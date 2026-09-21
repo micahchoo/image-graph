@@ -6,6 +6,31 @@ detection are plain canvas work: no OpenSeadragon, no Annotorious.
 Shared types live in `src/types.ts`. Treat every signature below as a contract;
 changing one means changing its consumers in the same pass.
 
+Roles (src/types.ts) — GraphData, GraphEdits, ImageAssets, BackgroundJobs, VaultDoors, AnnotationBridge:
+- GraphHost is their union, so the plugin implements one thing; a collaborator takes only the role it needs and is handed a stub in a test.
+- Split because a single 33-member interface had come to mirror the plugin's public surface rather than the workspace's need: imageUrl, resumeJobs and updateImage were on it although nothing across the seam called them.
+
+Canvas renderer src/canvas-renderer.ts exports CanvasRenderer, FrameState and Palette:
+- One frame of the live canvas. Everything it draws comes from the GraphScene it is handed and the FrameState of that frame; it owns only its caches — the tile mosaic and the version that invalidates it.
+- Reads no DOM but the document it makes a detached canvas in, so tests/fake-canvas.ts drives it and reads back the calls.
+- The richer sibling of render.ts#renderScene (still images for note embeds and PNG export). The two agree on culling, palette and captions because both read geometry.ts and presentation.ts; they part company over caching, hover, drafts and routed connections, which only a live canvas has.
+- A connection is only NAMED when it is relevant — selected, hovered, on the traced path, or matching the filter. Every connection is still drawn.
+
+Catalog module src/catalog.ts exports nextCatalog, isCatalogImage and stableId:
+- Pure. The whole-vault layout is derived, not stored: one record per image file, each as wide as its own picture, wrapped into rows in path order.
+- A placed image keeps its position and takes no slot in the rows. A record whose file has gone is marked missing, never dropped. An id is a function of the path.
+
+Scene module src/scene.ts exports GraphScene, Hit, ROUTE_LIMIT and REACH:
+- What is on screen, where it is, and what is under a point. NOT where we are looking — that is the camera, deliberately elsewhere.
+- Takes `Pick<GraphData,'getSnapshot'>`, so it needs no DOM and no Obsidian and is driven directly by tests/scene.test.ts.
+- Owns the routed polylines, because route() answers what a connection is drawn along and hit() must measure that same polyline. Keeping them apart is how a click came to select empty canvas beside a line and refuse the line itself.
+- view.ts holds one GraphScene and delegates; it keeps the camera, the drag, the drawing and the chrome.
+
+Shards module src/shards.ts exports ShardStore, shardIndex, shardPath, parseShardName, parseShard, validateRecord:
+- The only place that knows the on-disk format. GraphStore above it deals in records and never in paths, JSON or versions.
+- A record's id decides its shard, so nothing renumbers anything. Writes go through vault.process, so two writes on one shard merge rather than one losing.
+- validateRecord is liberal on read and strict on write: one hand-edited field must not stop a whole shard loading.
+
 Storage module src/store.ts exports GraphStore:
 - constructor(app: App, changed: () => void)
 - load(): Promise<void>; refreshCatalog(): Promise<void>; getSnapshot(): GraphSnapshot
@@ -33,6 +58,27 @@ Exploration module src/exploration.ts exports Exploration and EXPLORE_LIMIT:
 - setDepth clamps to 1..3 and clears expanded; expand/togglePin/pin/isRoot hold the rest. rebuild(snapshot) recomputes the graph and the layout.
 - filter dims connections and never reaches the traversal. EXPLORE_LIMIT is the one cap, and the status text reads it.
 - New exploration behaviour goes here, not in the view. The view keeps the camera, the selection and the two select elements.
+
+Gestures module src/gestures.ts exports Mode, DRAG_THRESHOLD, movedEnough, pressIntent, dragBecomes, pinchFrom and pinchStep:
+- A press is ambiguous until it moves. pressIntent says what it arms (marquee, handle, plain); dragBecomes says what it turns into once it passes DRAG_THRESHOLD.
+- dragBecomes is total: `pan` is the answer to everything unclaimed, because an unrecognised drag on a map must move the map rather than do nothing. A connection cannot be dragged, so a press on one pans.
+- Mode lives here, not in view.ts: what a drag means is the gesture's question.
+- pinchStep reports the spread and the slide together, because fingers do both at once, and zooms about the previous centre so the two do not fight.
+- Decisions only: no DOM, no camera, no records. view.ts does the effects.
+
+Camera module src/camera.ts exports toWorld, toScreen, viewportRect, zoomAt, scrollBy, fitBox, boxAround, scrollIntoView, wheelGesture and spansViewport:
+- Every function is pure and returns a new Camera; nothing here mutates the one it is given. Screen coordinates are relative to the canvas, never the client — only the caller knows where the element is.
+- zoomAt holds the world point under `at` fixed, including when the scale clamps. That fixed point is the contract.
+- fitBox is the one answer to "what camera shows this box". embed.ts#fitCamera is the same call with a block's padding and zoom limits; the workspace passes its own.
+- boxAround makes the symmetric box an anchored neighbourhood needs, so a fit keeps the starting picture centred without pushing half the graph off screen.
+- wheelGesture takes WheelInput as data, not a DOM event: deltaMode 1 is lines and 2 is screens, ctrl or meta zooms, shift pans a one-axis wheel sideways.
+- spansViewport is written out rather than built from boundsOf: it runs once per connection per frame and must allocate nothing.
+- view.ts holds the Camera and the element; it asks this module for every value it puts there.
+
+Folders module src/folders.ts exports ensureFolder, THUMBNAILS_ROOT, EXPORTS_ROOT and DATA_ROOT:
+- ensureFolder(app, path) is the only caller of vault.createFolder. It makes every missing parent and treats a lost race as success, because the folder is there either way; a folder still missing afterwards is a real failure and throws.
+- Every plugin folder is named here or in links.ts (PLUGIN_ROOT, NOTES_ROOT, EXTRACTED_ROOT). main.ts#scheduleRefresh matches vault changes against those names, not against literals, so a renamed folder cannot silently stop being watched.
+- OLD_NOTES_ROOT stays a literal on purpose: it names where an older version filed notes and must never follow a rename.
 
 Geometry module src/geometry.ts exports overlaps, onScreen and boundsOf:
 - The single answer to "do these share area", "does this reach the viewport" and "what box holds these".

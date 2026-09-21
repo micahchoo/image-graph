@@ -1,21 +1,17 @@
 import {parseYaml} from 'obsidian';
-import type {App, TAbstractFile, TFile} from 'obsidian';
+import type {App, TFile} from 'obsidian';
 import type {EdgeRecord, GraphSnapshot, ImageRecord, Properties, RegionRecord} from './types';
-import {ANNOTATIONS_KEY, LINKS_KEY, RESERVED_KEYS, parseProperties} from './properties';
-import {NOTES_ROOT, OLD_NOTES_ROOT, PLUGIN_ROOT, baseName, companionLinks, companionPath, defaultCompanionPath, sameLinks} from './links';
+import {ANNOTATIONS_KEY, LINKS_KEY, RESERVED_KEYS, isRecord, parseProperties} from './properties';
+import {NOTES_ROOT, OLD_NOTES_ROOT, PLUGIN_ROOT, baseName, companionCandidates, companionLinks, companionPath, sameLinks} from './links';
 import {History, type Entry} from './history';
-import {parseRegionShape, relationOf} from './graph';
+import {relationOf} from './graph';
 import {isForeignRegion, type ImageSource} from './annotations';
-import {gridSize, packRows, rowWidth} from './layout';
+import {ensureFolder, isFile} from './folders';
+import {ShardStore, validateRecord, type Kind, type Stored} from './shards';
+import {gridSize} from './layout';
+import {isCatalogImage, nextCatalog} from './catalog';
 import type {PixelSize} from './dimensions';
 
-const ROOT = '_Image Graph';
-const DATA = `${ROOT}/Data`;
-const VERSION = 1;
-const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'tif', 'tiff', 'avif']);
-type Kind = 'images' | 'regions' | 'edges';
-type Stored = ImageRecord | RegionRecord | EdgeRecord;
-type Shard = {version: number; kind: Kind; records: Stored[]};
 
 export class GraphStore {
   private images = new Map<string, ImageRecord>();
@@ -34,20 +30,14 @@ export class GraphStore {
   /** Collecting while a labelled mutation runs, null otherwise. */
   private journal: Entry[] | null = null;
 
-  constructor(private readonly app: App, private readonly changed: () => void) {}
+  private readonly shards: ShardStore;
+  constructor(private readonly app: App, private readonly changed: () => void) { this.shards = new ShardStore(app); }
 
   async load(): Promise<void> { await this.enqueue(async () => {
-    const images = new Map<string, ImageRecord>(), regions = new Map<string, RegionRecord>(), edges = new Map<string, EdgeRecord>();
-    for (const file of this.app.vault.getFiles()) {
-      const parsed = parseShardName(file.path);
-      if (!parsed) continue;
-      const records = await this.readShard(file, parsed.kind, parsed.index);
-      for (const record of records) {
-        if (parsed.kind === 'images') images.set(record.id, record as ImageRecord);
-        else if (parsed.kind === 'regions') regions.set(record.id, record as RegionRecord);
-        else edges.set(record.id, record as EdgeRecord);
-      }
-    }
+    const stored = await this.shards.readAll();
+    const images = new Map(stored.images.map(record => [record.id, record]));
+    const regions = new Map(stored.regions.map(record => [record.id, record]));
+    const edges = new Map(stored.edges.map(record => [record.id, record]));
     this.persistedImages = new Set(images.keys());
     this.images = images; this.regions = regions; this.edges = edges; this.snapshot = undefined;
     this.loaded = true;
@@ -65,18 +55,10 @@ export class GraphStore {
    * in the rows to do so, which is the whole meaning of having placed it.
    */
   private async refreshCatalogInternal(persist: boolean): Promise<void> {
-    const files = this.app.vault.getFiles().filter(file => isCatalogImage(file.path)).sort((a, b) => a.path.localeCompare(b.path));
-    const paths = new Set(files.map(file => file.path));
-    const byPath = new Map([...this.images.values()].map(image => [image.path, image]));
-    const catalogued: ImageRecord[] = files.map(file => {
-      const prior = byPath.get(file.path);
-      return prior ? {...prior, path: file.path, missing: false} : {id: stableId(file.path), path: file.path, x: 0, y: 0, ...gridSize(undefined)};
-    });
-    const placed = packRows(catalogued.filter(image => !image.pinned), rowWidth(catalogued.length));
-    const next = new Map<string, ImageRecord>(catalogued.map(image => { const at = placed.get(image.id); return [image.id, at ? {...image, ...at} : image]; }));
-    for (const old of this.images.values()) if (!paths.has(old.path)) next.set(old.id, {...old, missing: true});
-    const changed = [...next.values()].filter(image => JSON.stringify(this.images.get(image.id)) !== JSON.stringify(image));
-    this.images = next;
+    const paths = this.app.vault.getFiles().map(file => file.path).filter(isCatalogImage).sort((a, b) => a.localeCompare(b));
+    const catalogued = nextCatalog(paths, [...this.images.values()]);
+    const changed = catalogued.filter(image => JSON.stringify(this.images.get(image.id)) !== JSON.stringify(image));
+    this.images = new Map(catalogued.map(image => [image.id, image]));
     if (persist) await this.writeMany('images', changed.filter(image => this.persistedImages.has(image.id)));
     if (changed.length) { this.snapshot = undefined; this.changed(); }
   }
@@ -266,26 +248,14 @@ export class GraphStore {
     await this.writeDelete(kind, id); this.note(kind, id); map.delete(id); this.snapshot = undefined; this.changed();
     if (edge) await this.syncLinksInternal([edge.source.imageId, edge.target.imageId]);
   }); }
+  /** Write records and remember that each image now exists on disk. */
   private async writeOne(kind: Kind, record: Stored): Promise<void> { await this.writeMany(kind, [record]); }
-  /** One rewrite per shard whatever the batch size, still inside `process`, so a concurrent
-   * write to the same shard is merged rather than lost. */
   private async writeMany(kind: Kind, records: readonly Stored[]): Promise<void> {
     if (!records.length) return;
-    await this.ensureFolder(DATA);
-    const shards = new Map<number, Stored[]>();
-    for (const record of records) { const index = shardIndex(record.id); const batch = shards.get(index); if (batch) batch.push(record); else shards.set(index, [record]); }
-    for (const [index, batch] of shards) {
-      const path = shardPath(kind, index), file = this.app.vault.getAbstractFileByPath(path), replaced = new Set(batch.map(item => item.id));
-      if (file && isFile(file)) await this.app.vault.process(file, current => JSON.stringify({version: VERSION, kind, records: [...parseShard(current, kind, index).filter(item => !replaced.has(item.id)), ...batch]}, null, 2) + '\n');
-      else if (file) throw new Error(`Storage shard is not a file: ${path}`);
-      else await this.app.vault.create(path, JSON.stringify({version: VERSION, kind, records: batch}, null, 2) + '\n');
-    }
+    await this.shards.write(kind, records);
     if (kind === 'images') for (const record of records) this.persistedImages.add(record.id);
   }
-  private async writeDelete(kind: Kind, id: string): Promise<void> {
-    const path = shardPath(kind, shardIndex(id)); const file = this.app.vault.getAbstractFileByPath(path); if (!file || !isFile(file)) return;
-    await this.app.vault.process(file, current => { const records = parseShard(current, kind, shardIndex(id)).filter(item => item.id !== id); return JSON.stringify({version: VERSION, kind, records}, null, 2) + '\n'; });
-  }
+  private async writeDelete(kind: Kind, id: string): Promise<void> { await this.shards.remove(kind, id); }
   private async ensureCompanionInternal(imageId: string): Promise<TFile> {
     const image = this.images.get(imageId); if (!image) throw new Error(`Unknown image: ${imageId}`);
     const path = image.metadataPath ?? await this.freeCompanionPath(image);
@@ -344,16 +314,14 @@ export class GraphStore {
    * somebody else wrote at that name. Both step aside rather than being claimed.
    */
   private async freeCompanionPath(image: ImageRecord): Promise<string> {
-    const wanted = defaultCompanionPath(image.path, this.displayName(image));
-    const extension = image.path.split('.').pop() ?? '';
-    const stem = wanted.slice(0, -3);
-    for (const candidate of [wanted, `${stem} (${extension}).md`, ...Array.from({length: 20}, (_, n) => `${stem} ${n + 2}.md`)]) {
+    const candidates = companionCandidates(image.path, this.displayName(image));
+    for (const candidate of candidates) {
       const file = this.app.vault.getAbstractFileByPath(candidate);
       if (!file) return candidate;
       if (!isFile(file)) continue;
       if ((await this.readFrontmatter(file))?.image_graph_id === image.id) return candidate;
     }
-    throw new Error(`No free companion name near ${wanted}`);
+    throw new Error(`No free companion name near ${candidates[0]}`);
   }
 
   /** What the workspace calls this picture. An extracted region's file name is a uuid, and a
@@ -403,7 +371,6 @@ export class GraphStore {
     return moved;
   }); }
 
-  private async readShard(file: TFile, kind: Kind, index: number): Promise<Stored[]> { return parseShard(await this.app.vault.read(file), kind, index); }
   private map(kind: Kind): Map<string, Stored> { return kind === 'images' ? this.images : kind === 'regions' ? this.regions : this.edges; }
   private putMemory(kind: Kind, record: Stored): void { validateRecord(kind, record); this.note(kind, record.id, record); this.map(kind).set(record.id, record); this.snapshot = undefined; }
   /**
@@ -447,45 +414,12 @@ export class GraphStore {
     return step.label;
   }); }
   private enqueue<T>(fn: () => Promise<T>): Promise<T> { const result = this.queue.then(fn, fn); this.queue = result.then(() => undefined, () => undefined); return result; }
-  private async ensureFolder(path: string): Promise<void> { const parts = path.split('/'); let current = ''; for (const part of parts) { current = current ? `${current}/${part}` : part; if (!this.app.vault.getAbstractFileByPath(current)) await this.app.vault.createFolder(current); } }
+  private async ensureFolder(path: string): Promise<void> { await ensureFolder(this.app, path); }
 }
 
-function isFile(file: TAbstractFile): file is TFile { return 'extension' in file && 'stat' in file; }
 /** A foreign region is edited where it was drawn. Refusing here keeps every write path honest at once. */
 function refuseForeign(id: string, foreign: ReadonlyMap<string, RegionRecord>, record?: RegionRecord): void { if (foreign.has(id) || (record && isForeignRegion(record))) throw new Error('This region belongs to Image Annotation. Edit or delete it there.'); }
 function sameRecords(a: ReadonlyMap<string, RegionRecord>, b: ReadonlyMap<string, RegionRecord>): boolean { if (a.size !== b.size) return false; for (const [id, record] of a) { const other = b.get(id); if (!other || JSON.stringify(record) !== JSON.stringify(other)) return false; } return true; }
-function isCatalogImage(path: string): boolean { if (path.startsWith(`${ROOT}/`)) return path.startsWith(`${ROOT}/Extracted/`) && IMAGE_EXTENSIONS.has(path.split('.').pop()?.toLowerCase() ?? ''); return IMAGE_EXTENSIONS.has(path.split('.').pop()?.toLowerCase() ?? ''); }
-function stableId(path: string): string { let a = 2166136261, b = 5381; for (const char of path) { a = Math.imul(a ^ char.charCodeAt(0), 16777619); b = Math.imul(b,33) ^ char.charCodeAt(0); } return `img-${(a >>> 0).toString(16).padStart(8, '0')}${(b >>> 0).toString(16).padStart(8, '0')}`; }
-function shardIndex(id: string): number { let hash = 0; for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) | 0; return (hash >>> 0) % 64; }
-function shardPath(kind: Kind, index: number): string { return `${DATA}/${kind}-${index.toString(16).padStart(2, '0')}.json`; }
-function parseShardName(path: string): {kind: Kind; index: number} | undefined { const match = path.match(new RegExp(`^${DATA}/(images|regions|edges)-([0-9a-f]{2})\\.json$`)); return match ? {kind: match[1] as Kind, index: Number.parseInt(match[2], 16)} : undefined; }
-function parseShard(text: string, kind: Kind, index: number): Stored[] { let value: unknown; try { value = JSON.parse(text); } catch { throw new Error(`Corrupt Image Graph shard: ${shardPath(kind, index)}`); } if (!value || typeof value !== 'object' || (value as Shard).version !== VERSION || (value as Shard).kind !== kind || !Array.isArray((value as Shard).records)) throw new Error(`Invalid Image Graph shard: ${shardPath(kind, index)}`); const records = (value as Shard).records; records.forEach(record => validateRecord(kind, record)); return records; }
-/**
- * `strict` is for writes. A shard read from the vault is accepted more liberally, because one
- * hand-edited field should not stop a whole shard loading; the write path is where the rules bite.
- */
-function validateRecord(kind: Kind, record: unknown, strict = false): asserts record is Stored {
- if (!isRecord(record) || typeof record.id !== 'string' || !record.id) throw new Error(`Invalid ${kind} record`);
- if (kind === 'images' && (typeof record.path !== 'string' || !record.path || !finite(record.x) || !finite(record.y) || !finite(record.width) || record.width <= 0 || !finite(record.height) || record.height <= 0)) throw new Error('Invalid image record');
- if (kind === 'regions') {
-  if (typeof record.imageId !== 'string' || !record.imageId) throw new Error('A region must belong to an image.');
-  if (typeof record.label !== 'string') throw new Error('Give the region a label.');
-  record.shape = parseRegionShape(record.shape);
- }
- if (kind === 'edges') {
-  if (!validEndpoint(record.source) || !validEndpoint(record.target)) throw new Error('A connection needs a source and a target.');
-  if (!['none', 'forward', 'reverse', 'both'].includes(record.direction as string)) throw new Error('Choose an arrow direction.');
-  // A connection without a relation has simply not been described yet. One that carries an
-  // unusable relation is corrupt, and the renderer used to hide that behind its own fallback.
-  if (strict && isRecord(record.properties) && 'relation' in record.properties && !relationOf(record.properties)) {
-   throw new Error('Describe the connection in relation, as text, for example “resembles”.');
-  }
- }
- if (kind !== 'images') record.properties = parseProperties(record.properties);
-}
-function validEndpoint(value: unknown): boolean { return isRecord(value) && typeof value.imageId === 'string' && value.imageId.length > 0 && (!('regionId' in value) || typeof value.regionId === 'string' && value.regionId.length > 0); }
-function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
-function finite(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value); }
 function clone<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
 function cleanProperties(properties: Record<string, unknown>): Record<string, unknown> { const result = {...properties}; for (const key of RESERVED_KEYS) delete result[key]; return result; }
 /** Keep every value the panel can show and drop the rest, so one odd field is not a dead end. */

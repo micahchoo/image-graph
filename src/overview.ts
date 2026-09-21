@@ -2,8 +2,9 @@ import {App, TFile} from 'obsidian';
 import type {ImageRecord} from './types';
 import {detached} from './dom';
 import type {JobHandle, Jobs} from './jobs';
+import {THUMBNAILS_ROOT, ensureFolder} from './folders';
 
-const TILE=32, SIDE=512, PER_PAGE=256, ROOT='_Image Graph/Thumbnails';
+const TILE=32, SIDE=512, PER_PAGE=256, ROOT=THUMBNAILS_ROOT;
 const PAGE_BYTES=SIDE*SIDE*4, BUDGET=96*1024*1024, GRACE=1000;
 type Signature={id:string;path:string;mtime:number;size:number};
 type Crop={source:CanvasImageSource;x:number;y:number;width:number;height:number};
@@ -164,7 +165,8 @@ export class OverviewAtlas {
   }catch(error){if(this.current(page)){page.complete=true;console.warn('Image Graph overview cache:',error);}}
  }
  private async ensureFolders(){
-  if(!this.folders)this.folders=(async()=>{for(const path of ['_Image Graph',ROOT])if(!this.app.vault.getAbstractFileByPath(path))await this.app.vault.createFolder(path);})().catch((error:unknown)=>{this.folders=undefined;throw error;});
+  // Memoised because every page save asks, and the answer cannot change back.
+  if(!this.folders)this.folders=ensureFolder(this.app,ROOT).catch((error:unknown)=>{this.folders=undefined;throw error;});
   await this.folders;
  }
  private async save(page:Page,items:Array<Signature|null>,canvas:HTMLCanvasElement){

@@ -70,6 +70,22 @@ export function companionLinks(imageId: string, edges: readonly EdgeRecord[], im
  return [...links].sort();
 }
 
+/**
+ * The names a new companion note may take, in the order to try them.
+ *
+ * Mirroring the picture's own folder makes a clash all but impossible; the two that remain are
+ * two pictures in one folder differing only by extension, and a note somebody else wrote at
+ * that name. Both step aside rather than being claimed — the extension first, because it names
+ * the difference, then a counter. The caller probes each and takes the first free one, or one
+ * already carrying this image's id.
+ */
+export function companionCandidates(imagePath: string, displayName?: string): string[] {
+ const wanted = defaultCompanionPath(imagePath, displayName);
+ const extension = imagePath.split('.').pop() ?? '';
+ const stem = wanted.slice(0, -3);
+ return [wanted, `${stem} (${extension}).md`, ...Array.from({length: 20}, (_, n) => `${stem} ${n + 2}.md`)];
+}
+
 export function sameLinks(current: unknown, links: readonly string[]): boolean {
  if (!links.length) return current === undefined || (Array.isArray(current) && current.length === 0);
  return Array.isArray(current) && current.length === links.length && current.every((item, index) => item === links[index]);

@@ -1,6 +1,6 @@
 import {describe, expect, it, vi} from 'vitest';
 vi.mock('obsidian', () => ({parseYaml: () => ({})}));
-import {annotationLinks, attachmentLink, companionLinks, companionPath, defaultCompanionPath, safeName, sameLinks} from '../src/links';
+import {annotationLinks, attachmentLink, companionCandidates, companionLinks, companionPath, defaultCompanionPath, safeName, sameLinks} from '../src/links';
 import type {EdgeRecord, ImageRecord} from '../src/types';
 
 const image = (id: string, path: string, metadataPath?: string): ImageRecord => ({id, path, x: 0, y: 0, width: 240, height: 240, ...(metadataPath ? {metadataPath} : {})});
@@ -87,4 +87,33 @@ describe('companion note connection links', () => {
   expect(links.has('b')).toBe(false);
  });
 
+});
+
+describe('the names a new companion note may take', () => {
+ it('offers the mirrored path first', () => {
+  expect(companionCandidates('Photos/Harbour.png')[0]).toBe('_Image Graph/Notes/Photos/Harbour.md');
+ });
+
+ it('falls back to the extension before a counter, because it names the difference', () => {
+  const [, second, third] = companionCandidates('Photos/Harbour.png');
+  expect(second).toBe('_Image Graph/Notes/Photos/Harbour (png).md');
+  expect(third).toBe('_Image Graph/Notes/Photos/Harbour 2.md');
+ });
+
+ it('separates two pictures that differ only by extension', () => {
+  const png = companionCandidates('Photos/Harbour.png'), jpg = companionCandidates('Photos/Harbour.jpg');
+  expect(png[0]).toBe(jpg[0]);
+  expect(png[1]).not.toBe(jpg[1]);
+ });
+
+ it('uses a display name where one was worked out, and every candidate follows it', () => {
+  const named = companionCandidates('_Image Graph/Extracted/region-00e6.png', 'The mast · Harbour');
+  expect(named[0]).toBe('_Image Graph/Notes/Extracted/The mast · Harbour.md');
+  expect(named.every(path => path.includes('The mast'))).toBe(true);
+ });
+
+ it('always offers more than one, so a clash is never a dead end', () => {
+  expect(companionCandidates('a.png').length).toBeGreaterThan(20);
+  expect(new Set(companionCandidates('a.png')).size).toBe(companionCandidates('a.png').length);
+ });
 });

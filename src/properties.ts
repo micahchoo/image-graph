@@ -19,8 +19,16 @@ export class PropertyError extends Error {
  get detail(): string {return this.path.length ? `${this.message} (in ${this.where})` : this.message;}
 }
 
+/**
+ * A value with named fields. Two strengths, and the difference matters: `isRecord` admits any
+ * object that is not an array, which is what parsing untrusted JSON wants; `isPlainObject` also
+ * refuses anything with a prototype, which is what deciding a property may be STORED wants —
+ * a Date is an object and is not a property value.
+ */
+export const isRecord = (value: unknown): value is Record<string, unknown> =>
+ !!value && typeof value === 'object' && !Array.isArray(value);
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
- !!value && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+ isRecord(value) && Object.getPrototypeOf(value) === Object.prototype;
 
 export function checkKey(key: string, path: PropertyPath = [], reserved: readonly string[] = []): void {
  if (!key.trim()) throw new PropertyError('Enter a property name.', path);

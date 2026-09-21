@@ -18,9 +18,20 @@ export function validateProperties(properties: Properties, reservedKeys: string[
  parseProperties(properties, reservedKeys);
 }
 
+/* Obsidian augments HTMLElement with addClass and toggleClass; a bare DOM in a test does not
+ * have them. These pick whichever is there. Written as `addClass?.(c) ?? classList.add(c)`
+ * until 2026-09-21, which reads as a choice and is not one: addClass returns undefined, so the
+ * right-hand side ran every time as well. Both happened to be idempotent — the next one copied
+ * from them might not be. */
+function addClass(element: HTMLElement, className: string): void {
+ if (typeof element.addClass === 'function') element.addClass(className); else element.classList.add(className);
+}
+function setClass(element: HTMLElement, className: string, on: boolean): void {
+ if (typeof element.toggleClass === 'function') element.toggleClass(className, on); else element.classList.toggle(className, on);
+}
 function makeElement(parent: HTMLElement, tag: string, className?: string): HTMLElement {
  const element = (parent as HTMLElement & {createEl: (tag:string) => HTMLElement}).createEl(tag);
- if (className) element.addClass?.(className) ?? element.classList.add(className);
+ if (className) addClass(element, className);
  return element;
 }
 function button(parent: HTMLElement, label: string, onClick: () => void): HTMLButtonElement {
@@ -36,10 +47,10 @@ function fieldLabel(parent: HTMLElement, text: string, control: HTMLElement): HT
 /** Show or clear a problem on one control, so a save is not the first time anyone hears about it. */
 function mark(control: HTMLElement | undefined, note: HTMLElement, message: string | null): void {
  note.textContent = message ?? '';
- note.toggleClass?.('is-hidden', !message) ?? note.classList.toggle('is-hidden', !message);
+ setClass(note, 'is-hidden', !message);
  if (!control) return;
  if (message) control.setAttribute('aria-invalid', 'true'); else control.removeAttribute('aria-invalid');
- control.toggleClass?.('is-invalid', !!message) ?? control.classList.toggle('is-invalid', !!message);
+ setClass(control, 'is-invalid', !!message);
 }
 
 const FORMAT_LABELS: Record<ValueType, string> = {text: 'Text', number: 'Number', boolean: 'Yes / no', list: 'List', object: 'Group of properties', null: 'Empty'};
@@ -76,7 +87,7 @@ class ValueEditor {
   return scalarText(previous);
  }
  private render(value: PropertyValue): void {
-  this.root.empty?.(); this.root.replaceChildren(); this.children = []; this.entries = [];
+  this.root.replaceChildren(); this.children = []; this.entries = [];
   const select = makeElement(this.root, 'select') as HTMLSelectElement; this.control = select;
   for (const t of ['text','number','boolean','list','object','null'] as ValueType[]) { const option = makeElement(select, 'option') as HTMLOptionElement; option.value = t; option.textContent = FORMAT_LABELS[t]; if (t === this.type) option.selected = true; }
   select.setAttribute('aria-label', 'Format'); fieldLabel(this.root, 'Format', select);
@@ -149,7 +160,7 @@ export function renderPropertyBuilder(container: HTMLElement, properties: Proper
   const keyInput = makeElement(row, 'input') as HTMLInputElement; keyInput.value = key; keyInput.placeholder = 'Example: Creator'; keyInput.setAttribute('aria-label', 'Property name'); fieldLabel(row, 'Property name', keyInput);
   keyInput.addEventListener('input', notify);
   const editor = new ValueEditor(row, value, notify);
-  const note = makeElement(row, 'span', 'image-graph-property-problem'); note.setAttribute('role', 'alert'); note.addClass?.('is-hidden') ?? note.classList.add('is-hidden');
+  const note = makeElement(row, 'span', 'image-graph-property-problem'); note.setAttribute('role', 'alert'); addClass(note, 'is-hidden');
   const record = {row, keyInput, editor, note};
   rows.push(record);
   if (focus) keyInput.focus();

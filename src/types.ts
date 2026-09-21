@@ -20,31 +20,68 @@ export interface EdgeRecord {id:string;source:Endpoint;target:Endpoint;direction
 export interface GraphSnapshot {images:ImageRecord[];regions:RegionRecord[];edges:EdgeRecord[]}
 export interface Camera {x:number;y:number;scale:number}
 export interface ViewFrame {imageIds:string[];edgeIds?:string[];positions:Record<string,Rect>;camera:Camera;width:number;height:number}
-export interface GraphHost {
+/**
+ * What the workspace may ask of the plugin, in six roles rather than one list of thirty-three.
+ *
+ * `GraphHost` was a single interface that grew a member for every capability, and it had come
+ * to mirror the plugin's public surface rather than the workspace's need: `imageUrl`,
+ * `resumeJobs` and `updateImage` were on it although nothing across the seam ever called them.
+ * A feature cost a member here, a method in `main.ts` and a call in the view before any of it
+ * did anything.
+ *
+ * Split by what a collaborator is FOR, so a part of the workspace can take the one role it
+ * needs and be handed a stub in a test. The roles are disjoint, and `GraphHost` is still their
+ * union, so the plugin implements one thing and nothing downstream had to move.
+ */
+
+/** Reading the graph, and hearing when it changes. */
+export interface GraphData {
  getSnapshot():GraphSnapshot;
  subscribe(callback:()=>void):()=>void;
- /** Progress only. Never the graph: a redraw, not a reload. */
- subscribeJobs(callback:()=>void):()=>void;
- imageUrl(image:ImageRecord):string;
- thumbnail(image:ImageRecord,ready:()=>void,pixels?:number):CanvasImageSource|null;
- overviewThumbnail(image:ImageRecord,ready:()=>void):{source:CanvasImageSource;x:number;y:number;width:number;height:number}|null;
- jobState():JobState|null;
- stopJobs():void;
- resumeJobs():void;
- updateImage(image:ImageRecord):Promise<void>;
+}
+
+/** Changing it. Every one of these is a vault write, and every one is undoable. */
+export interface GraphEdits {
  updateImages(images:readonly ImageRecord[]):Promise<void>;
  unpinImages(ids?:readonly string[]):Promise<number>;
- /** Append a block to a note the owner picks. Returns the note, or '' if they cancelled. */
- insertNoteBlock(block:string):Promise<string>;
  saveRegion(region:RegionRecord):Promise<void>;
  deleteRegion(id:string):Promise<void>;
  saveEdge(edge:EdgeRecord):Promise<void>;
  deleteEdge(id:string):Promise<void>;
  readMetadata(imageId:string):Promise<Properties>;
  saveMetadata(imageId:string,properties:Properties):Promise<void>;
+ undo():Promise<void>;
+ redo():Promise<void>;
+ historyLabels():{undo:string|null;redo:string|null};
+}
+
+/** Pixels to draw with. Neither loads: they answer with what is cached and call back later. */
+export interface ImageAssets {
+ thumbnail(image:ImageRecord,ready:()=>void,pixels?:number):CanvasImageSource|null;
+ overviewThumbnail(image:ImageRecord,ready:()=>void):{source:CanvasImageSource;x:number;y:number;width:number;height:number}|null;
+}
+
+/** Long work, watched and stoppable. Progress only — never the graph: a redraw, not a reload. */
+export interface BackgroundJobs {
+ subscribeJobs(callback:()=>void):()=>void;
+ jobState():JobState|null;
+ stopJobs():void;
+}
+
+/** Ways out of the canvas and into the vault. All of them open or create something. */
+export interface VaultDoors {
  openCompanion(imageId:string):Promise<void>;
  openImage(imageId:string):Promise<void>;
  extractRegion(regionId:string):Promise<void>;
+ /** Append a block to a note the owner picks. Returns the note, or '' if they cancelled. */
+ insertNoteBlock(block:string):Promise<string>;
+ exportCanvas(frame:ViewFrame):Promise<TFile>;
+ exportVisual(frame:ViewFrame,source?:HTMLCanvasElement):Promise<TFile>;
+ seedDemo():Promise<void>;
+}
+
+/** Image Annotation, which may not be installed. Every door here is checked before it is shown. */
+export interface AnnotationBridge {
  /** Where Image Annotation attached a foreign region. Empty for one of ours. */
  regionAttachments(regionId:string):readonly Attachment[];
  openAttachment(attachment:Attachment):Promise<void>;
@@ -52,11 +89,8 @@ export interface GraphHost {
  annotationAvailable():boolean;
  openInAnnotation(regionId:string):Promise<void>;
  annotateInAnnotation(imageId:string):Promise<void>;
- exportCanvas(frame:ViewFrame):Promise<TFile>;
- exportVisual(frame:ViewFrame,source?:HTMLCanvasElement):Promise<TFile>;
- seedDemo():Promise<void>;
- undo():Promise<void>;
- redo():Promise<void>;
- historyLabels():{undo:string|null;redo:string|null};
 }
+
+export interface GraphHost extends GraphData,GraphEdits,ImageAssets,BackgroundJobs,VaultDoors,AnnotationBridge {}
+
 export function newId(prefix:string):string{return `${prefix}-${crypto.randomUUID()}`;}

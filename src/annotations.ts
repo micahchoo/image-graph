@@ -14,6 +14,7 @@
 import type {App} from 'obsidian';
 import type {Attachment, RegionRecord} from './types';
 import {parseRegionShape} from './graph';
+import {isRecord} from './properties';
 
 export const ANNOTATION_ROOT = 'Image Annotation';
 export const ANNOTATION_INDEX = `${ANNOTATION_ROOT}/index.json`;
@@ -82,4 +83,3 @@ export function annotationPlugin(app: App): AnnotationPlugin | null {
  return plugin as unknown as AnnotationPlugin;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }

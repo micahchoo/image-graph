@@ -2,20 +2,20 @@ import {FuzzySuggestModal, ItemView, Menu, Modal, Notice, WorkspaceLeaf, setIcon
 import type {App} from 'obsidian';
 import type {Camera, Direction, EdgeRecord, Endpoint, GraphHost, GraphSnapshot, ImageRecord, Point, Properties, Rect, RegionRecord, RegionShape, ViewFrame} from './types';
 import {newId} from './types';
-import {containsRegion, edgeEndpoints, parseRegionShape, regionHandles, relationNames, relationOf, resizeRegion, tracePath, type HandleId} from './graph';
+import {edgeEndpoints, parseRegionShape, regionHandles, relationNames, relationOf, resizeRegion, tracePath, type HandleId} from './graph';
 import {isForeignRegion} from './annotations';
 import {renderPropertyBuilder} from './property-builder';
 import {RESERVED_KEYS, propertyMessage} from './properties';
 import {EXPLORE_LIMIT, Exploration} from './exploration';
-import {NOTHING, imageSelection, keepImages, prune, selectTarget, selectedImages, type Selection} from './selection';
-import {SpatialIndex, neighbourInDirection} from './spatial';
+import {NOTHING, imageSelection, keepImages, type Selection} from './selection';
+import {neighbourInDirection} from './spatial';
+import {GraphScene, type Hit} from './scene';
+import {CanvasRenderer} from './canvas-renderer';
 import {SHORTCUTS, commandFor, swallows, type Command} from './shortcuts';
 import {noteBlock} from './blocks';
-import {LANE, distanceToPath, midpointOf, routeOrthogonal} from './routing';
-import {detailSize} from './thumbnails';
-import {detached} from './dom';
-import {boundsOf, onScreen, overlaps} from './geometry';
-import {connectionStyle, imageCaptions, shortenLabel} from './presentation';
+import {MAX_FIT_SCALE, boxAround, fitBox, scrollBy, scrollIntoView, toWorld, viewportRect, wheelGesture, zoomAt as zoomCameraAt} from './camera';
+import {rectBetween} from './geometry';
+import {type Draft, type Mode, type Pinch, dragBecomes, movedEnough, pinchFrom, pinchStep, pressIntent, regionFromDrag} from './gestures';
 
 export const VIEW_TYPE='image-graph-view';
 
@@ -41,16 +41,14 @@ class RelationPicker extends FuzzySuggestModal<string>{
  getItemText(name:string){const count=this.counts.get(name)??0;return `${name} — ${count} connection${count===1?'':'s'}`;}
  onChooseItem(name:string){this.chosen(name);}
 }
-type Hit={endpoint:Endpoint}|{edge:EdgeRecord};
-type Mode='select'|'rect'|'polygon'|'connect'|'move';
 /** Work the owner began and has not committed. One field, so cancelling is one assignment. */
-type Draft={kind:'polygon';imageId:string;points:Point[]}|{kind:'connect';source:Endpoint}|{kind:'region';imageId:string;start:Point;last:Point}
- |{kind:'resize';regionId:string;imageId:string;handle:HandleId;origin:RegionShape;shape:RegionShape};
-interface TileLayer {canvas:HTMLCanvasElement;doc:Document;camera:Camera;width:number;height:number;ratio:number;positions:Map<string,Rect>;version:number;card:string;bg:string}
 interface Drag {pointer:number;kind:'waiting'|'pan'|'image'|'region'|'marquee'|'handle';start:Point;screen:Point;origin:Camera;hit:Hit|null;imageId?:string;origins?:Map<string,Rect>;marquee?:{base:ReadonlySet<string>;last:Point};forcePan:boolean;forceMove:boolean}
 const clamp=(v:number,min:number,max:number)=>Math.max(min,Math.min(max,v));
+/** World units added to a box before fitting, so captions and rings are not clipped. */
+const FIT_MARGIN=100;
+/** The zoom and status strip along the bottom, which a fit lifts the picture clear of. */
+const FOOTER_BAND=35;
 const copy=(r:Rect):Rect=>({x:r.x,y:r.y,width:r.width,height:r.height});
-interface LabelJob {text:string;a:Point;b:Point;alpha:number;priority:number}
 const relation=(e:EdgeRecord)=>relationOf(e.properties)??'related to';
 
 export class ImageGraphView extends ItemView {
@@ -81,30 +79,11 @@ export class ImageGraphView extends ItemView {
  private jobStop!:HTMLButtonElement;
  private announced='';
  private propertyBuilders:Array<{dispose():void}>=[];
- private snapshot:GraphSnapshot={images:[],regions:[],edges:[]};
- private images=new Map<string,ImageRecord>();
- private captions=new Map<string,string>();
- private regions=new Map<string,RegionRecord>();
- private regionsByImage=new Map<string,RegionRecord[]>();
- private wholePositions=new Map<string,Rect>();
- private wholeIds:readonly string[]=[];
- private index:{ids:readonly string[];positions:Map<string,Rect>;version:number;value:SpatialIndex}|null=null;
- // Bumped where a position map is changed in place rather than replaced.
- private indexVersion=0;
- // A route is world geometry, so it survives panning and zooming. It is cleared with the
- // index, which is exactly when a rectangle moved.
- private routes=new Map<string,Point[]|null>();
- /** Whether the last frame routed. The hit test has to measure what was drawn, and a frame
-  * that fell back to straight lines leaves routes in the cache that it did not use. */
- private routed=false;
- /** Above this many connections on screen, routing costs more than the tangle it removes. */
- private static readonly ROUTE_LIMIT=240;
- /** How near the pointer must come to a connection, in screen pixels. */
- private static readonly REACH=7;
+ /** What is on screen, where it is, and what is under a point. Needs no DOM. */
+ private readonly scene:GraphScene;
+ /** One frame of canvas. Owns the tile mosaic; reads the scene and the frame's state. */
+ private renderer!:CanvasRenderer;
  private camera:Camera={x:0,y:0,scale:1};
- private exploration:Exploration|null=null;
- private selection:Selection=NOTHING;
- private selectionImages:ReadonlySet<string>=selectedImages(NOTHING);
  private draft:Draft|null=null;
  private mode:Mode='select';
  // The toolbar says which mode is on. Mode is also assigned outside setMode, so the
@@ -121,7 +100,7 @@ export class ImageGraphView extends ItemView {
  private hoverPoint:{clientX:number;clientY:number}|null=null;
  private hoverRead:{clientX:number;clientY:number;camera:Camera;mode:Mode}|null=null;
  private pointers=new Map<number,Point>();
- private pinch:{distance:number;center:Point}|null=null;
+ private pinch:Pinch|null=null;
  private space=false;
  private longPress:number|undefined;
  private zoomTimer:number|undefined;
@@ -135,29 +114,31 @@ export class ImageGraphView extends ItemView {
  private unsubscribeJobs:(()=>void)|null=null;
  private stats={visible:0,drawMs:0,frameMs:0};
  private lastDraw=0;
- private layer:TileLayer|null=null;
- private layerVersion=0;
- // A thumbnail arriving changes what the cached layer should show; a redraw alone would keep the old one.
- private redraw=()=>{this.layerVersion++;this.schedule();};
- constructor(leaf:WorkspaceLeaf,private readonly host:GraphHost){super(leaf);}
+ // A thumbnail arriving changes what the cached mosaic should show; a redraw alone keeps the old one.
+ private redraw=()=>{this.renderer?.invalidate();this.schedule();};
+ constructor(leaf:WorkspaceLeaf,private readonly host:GraphHost){super(leaf);this.scene=new GraphScene(host);}
  getViewType(){return VIEW_TYPE;}
  getDisplayText(){return 'Image graph';}
  getIcon(){return 'images';}
- get positions(){return this.exploration?.positions??this.wholePositions;}
- // Every reader of the old three fields asks one of these. Only setSelection writes.
- private get selected(){return this.selectionImages;}
- private get selectedRegion(){return this.selection.kind==='region'?this.selection.regionId:null;}
- private get selectedEdge(){return this.selection.kind==='edge'?this.selection.id:null;}
+ get positions(){return this.scene.positions;}
+ private get snapshot(){return this.scene.snapshot;}
+ private get exploration(){return this.scene.exploration;}
+ private set exploration(next:Exploration|null){this.scene.exploration=next;}
+ private get selection(){return this.scene.selection;}
+ private get selected(){return this.scene.selectedImages;}
+ private get selectedRegion(){return this.scene.selectedRegion;}
+ private get selectedEdge(){return this.scene.selectedEdge;}
  private get polygon(){return this.draft?.kind==='polygon'?this.draft:null;}
  private get pending(){return this.draft?.kind==='connect'?this.draft.source:null;}
- // The set is cached because the draw loop asks it once per image.
- private setSelection(next:Selection){this.selection=next;this.selectionImages=selectedImages(next);}
- private pruneSelection(keepsImage:(imageId:string)=>boolean){this.setSelection(prune(this.selection,{image:keepsImage,region:id=>this.regions.has(id),edge:id=>this.snapshot.edges.some(e=>e.id===id)}));}
+ private setSelection(next:Selection){this.scene.setSelection(next);}
+ /** Connections are measured against the polyline the last frame drew. See `scene.hit`. */
+ private hit(p:Point){return this.scene.hit(p,this.camera.scale,edge=>edgeEndpoints(edge,this.positions,this.scene.regions));}
  private get win(){return this.containerEl.ownerDocument.defaultView??window;}
  private run(action:()=>Promise<unknown>){void action().catch((error:unknown)=>new Notice(`Image Graph: ${error instanceof Error?error.message:String(error)}`,8000));}
 
  async onOpen():Promise<void>{
   this.active=true;this.contentEl.empty();this.contentEl.addClass('image-graph-view');
+  this.renderer=new CanvasRenderer(this.contentEl.ownerDocument,this.host,this.redraw);
   const root=this.contentEl.createDiv({cls:'image-graph-root'}),bar=root.createDiv({cls:'image-graph-toolbar'});
   const button=(host:HTMLElement,text:string,action:()=>void)=>{const b=host.createEl('button',{text});this.registerDomEvent(b,'click',action);return b;};
   /* One fixed row. Everything that comes and goes floats over the canvas instead, because a
@@ -201,12 +182,12 @@ export class ImageGraphView extends ItemView {
    tool('move','move','Move','M',()=>this.setMode('move')),
    tool('rect','square','Region','R',()=>this.setMode('rect')),
    tool('polygon','pen-tool','Polygon','G',()=>this.setMode('polygon')),
-   tool('connect','git-fork','Connect','C',()=>{const hit=this.selectionHit();this.beginConnect(hit&&'endpoint'in hit?hit.endpoint:undefined);}),
+   tool('connect','git-fork','Connect','C',()=>{const hit=this.scene.selectionHit();this.beginConnect(hit&&'endpoint'in hit?hit.endpoint:undefined);}),
   ];
   const right=bar.createDiv({cls:'image-graph-toolbar-end'});
   /* The Export button was a strict duplicate: `menu()` already ends with `exportMenu`. */
   const actions=right.createEl('button',{cls:'image-graph-icon-button',attr:{'aria-label':'Actions, export and undo'}});setIcon(actions,'more-horizontal');
-  this.registerDomEvent(actions,'click',()=>{const r=actions.getBoundingClientRect();this.menu({clientX:r.left,clientY:r.bottom},this.selectionHit());});
+  this.registerDomEvent(actions,'click',()=>{const r=actions.getBoundingClientRect();this.menu({clientX:r.left,clientY:r.bottom},this.scene.selectionHit());});
   const properties=right.createEl('button',{cls:'image-graph-icon-button',attr:{'aria-label':'Properties panel'}});setIcon(properties,'panel-right');
   this.registerDomEvent(properties,'click',()=>this.toggleInspector());
   const body=root.createDiv({cls:'image-graph-body'}),stage=body.createDiv({cls:'image-graph-stage'});
@@ -257,140 +238,42 @@ export class ImageGraphView extends ItemView {
   this.registerDomEvent(this.canvas,'wheel',event=>this.wheel(event),{passive:false});
   this.registerDomEvent(this.canvas,'keydown',event=>this.keydown(event));this.registerDomEvent(this.canvas,'keyup',event=>{if(event.code==='Space')this.space=false;});
   this.registerDomEvent(this.win,'blur',()=>this.cancel());
-  this.observer=new ResizeObserver(()=>{const ratio=this.win.devicePixelRatio||1;this.canvas.width=Math.max(1,Math.round(this.canvas.clientWidth*ratio));this.canvas.height=Math.max(1,Math.round(this.canvas.clientHeight*ratio));if(!this.initialized&&this.images.size){this.initialized=true;this.fit();}this.schedule();});this.observer.observe(stage);
+  this.observer=new ResizeObserver(()=>{const ratio=this.win.devicePixelRatio||1;this.canvas.width=Math.max(1,Math.round(this.canvas.clientWidth*ratio));this.canvas.height=Math.max(1,Math.round(this.canvas.clientHeight*ratio));if(!this.initialized&&this.scene.images.size){this.initialized=true;this.fit();}this.schedule();});this.observer.observe(stage);
   // A theme change alters every colour the canvas reads, and nothing else redraws it.
-  this.registerEvent(this.app.workspace.on('css-change',()=>{this.layerVersion++;this.schedule();}));
+  this.registerEvent(this.app.workspace.on('css-change',()=>{this.renderer.invalidate();this.schedule();}));
   this.unsubscribe=this.host.subscribe(()=>this.refresh());
   this.unsubscribeJobs=this.host.subscribeJobs(()=>this.schedule());
   this.refresh();
  }
- async onClose():Promise<void>{this.active=false;this.metadataTicket++;this.clearLongPress();this.win.clearTimeout(this.zoomTimer);for(const builder of this.propertyBuilders)builder.dispose();this.propertyBuilders=[];this.unsubscribe?.();this.unsubscribe=null;this.unsubscribeJobs?.();this.unsubscribeJobs=null;this.observer?.disconnect();this.observer=null;this.win.cancelAnimationFrame(this.raf);this.raf=0;this.pointers.clear();this.releaseLayer();}
+ async onClose():Promise<void>{this.active=false;this.metadataTicket++;this.clearLongPress();this.win.clearTimeout(this.zoomTimer);for(const builder of this.propertyBuilders)builder.dispose();this.propertyBuilders=[];this.unsubscribe?.();this.unsubscribe=null;this.unsubscribeJobs?.();this.unsubscribeJobs=null;this.observer?.disconnect();this.observer=null;this.win.cancelAnimationFrame(this.raf);this.raf=0;this.pointers.clear();this.renderer.release();}
  private refresh(){
-  if(!this.active)return;this.snapshot=this.host.getSnapshot();this.images=new Map(this.snapshot.images.map(i=>[i.id,i]));this.regions=new Map(this.snapshot.regions.map(r=>[r.id,r]));this.regionsByImage.clear();
-  this.captions=imageCaptions(this.snapshot.images,this.snapshot.regions,this.snapshot.edges);
-  for(const r of this.snapshot.regions){const list=this.regionsByImage.get(r.imageId)??[];list.push(r);this.regionsByImage.set(r.imageId,list);}
-  this.wholePositions=new Map(this.snapshot.images.map(i=>[i.id,copy(i)]));this.wholeIds=this.snapshot.images.map(i=>i.id);
-  this.pruneSelection(id=>this.images.has(id));this.hoverRead=null;
-  if(this.draft?.kind==='resize'&&!this.regions.has(this.draft.regionId))this.draft=null;
+  if(!this.active)return;
+  this.scene.refresh();this.hoverRead=null;
+  if(this.draft?.kind==='resize'&&!this.scene.regions.has(this.draft.regionId))this.draft=null;
   const value=this.exploration?.relation??this.exploration?.filter??'';this.relationSelect.empty();this.relationSelect.createEl('option',{attr:{value:''},text:this.exploration?.relation?'Leave this relation':'All relations'});for(const label of [...new Set(this.snapshot.edges.map(relation))].filter(Boolean).sort())this.relationSelect.createEl('option',{attr:{value:label},text:label});this.relationSelect.value=value;
   if(this.exploration)this.rebuild(false);this.schedule();
  }
- private shownIds():readonly string[]{return this.exploration?.graph.ids??this.wholeIds;}
- /** The grid over the shown rectangles. Rebuilt when the layout changes, not per frame. */
- private spatial():SpatialIndex{
-  const ids=this.shownIds(),positions=this.positions,current=this.index;
-  if(current&&current.ids===ids&&current.positions===positions&&current.version===this.indexVersion)return current.value;
-  const value=new SpatialIndex(ids,positions);this.index={ids,positions,version:this.indexVersion,value};this.routes.clear();return value;
- }
  /** What the viewport covers in world coordinates. */
- private viewRect(w:number,h:number,camera:Camera=this.camera):Rect{return{x:-camera.x/camera.scale,y:-camera.y/camera.scale,width:w/camera.scale,height:h/camera.scale};}
- private shownEdges(){return this.exploration?.graph.edges??this.snapshot.edges;}
+ private viewRect(w:number,h:number,camera:Camera=this.camera):Rect{return viewportRect(camera,w,h);}
  private schedule(){if(!this.active||this.raf)return;this.raf=this.win.requestAnimationFrame(()=>{this.raf=0;this.draw();});}
  private draw(){
-  const ctx=this.canvas.getContext('2d');if(!ctx)return;this.readHover();const start=performance.now(),w=this.canvas.clientWidth,h=this.canvas.clientHeight,ratio=this.win.devicePixelRatio||1;
-  const css=this.win.getComputedStyle(this.contentEl),colour=(name:string,fallback:string)=>css.getPropertyValue(name).trim()||fallback;
-  // Every colour on the canvas comes from the theme. The eight that did not ignored a
-  // light theme and the owner's own accent, and were never measured for contrast.
-  const bg=colour('--background-primary','#181b20'),card=colour('--background-secondary','#333840'),fg=colour('--text-normal','#ddd'),accent=colour('--interactive-accent','#7bbda8');
-  const picked=colour('--color-yellow','#ffe0a0'),regionColour=colour('--color-green','#69dfb0'),regionHover=colour('--color-cyan','#a6f5d2'),missing=colour('--background-modifier-error','#733c43');
-  ctx.setTransform(ratio,0,0,ratio,0,0);ctx.fillStyle=bg;ctx.fillRect(0,0,w,h);const s=this.camera.scale;let visible=0;
-  // Limit demand as well as cache size: otherwise a dense viewport can repeatedly
-  // evict and re-request its own thumbnails on every completion redraw.
-  const detailed:string[]=[],shown=this.spatial().query(this.viewRect(w,h));visible=shown.length;
-  for(const id of shown){const r=this.positions.get(id);if(r&&r.width*s>=32)detailed.push(id);}
-  const center={x:(w/2-this.camera.x)/s,y:(h/2-this.camera.y)/s};
-  if(detailed.length>120)detailed.sort((a,b)=>{const ar=this.positions.get(a)!,br=this.positions.get(b)!;return Math.hypot(ar.x+ar.width/2-center.x,ar.y+ar.height/2-center.y)-Math.hypot(br.x+br.width/2-center.x,br.y+br.height/2-center.y);});
-  const thumbnailIds=new Set<string>();let detailBytes=0;
-  for(const id of detailed){const r=this.positions.get(id)!,size=detailSize(Math.max(r.width,r.height)*s*ratio);if(detailBytes+size*size*4>64*1024*1024||thumbnailIds.size>=120)continue;thumbnailIds.add(id);detailBytes+=size*size*4;}
-  // Below the detail threshold every image is one atlas tile, so a bitmap of the viewport
-  // and its margin stands in for tens of thousands of draw calls while the camera pans.
-  const layer=!detailed.length&&!this.zoomCursor&&!this.pinch&&this.drag?.kind!=='image'?this.tileLayer(w,h,ratio,card,bg,missing):null;
-  // Blit in device pixels: a fractional offset would resample the whole mosaic and soften it.
-  if(layer){ctx.setTransform(1,0,0,1,0,0);ctx.drawImage(layer.canvas,Math.round((this.camera.x-layer.camera.x)*ratio),Math.round((this.camera.y-layer.camera.y)*ratio));ctx.setTransform(ratio,0,0,ratio,0,0);}
-  ctx.save();ctx.translate(this.camera.x,this.camera.y);ctx.scale(this.camera.scale,this.camera.scale);
-  if(this.mode==='move'&&!this.exploration&&40*s>=12){const left=Math.floor(-this.camera.x/s/40)*40,top=Math.floor(-this.camera.y/s/40)*40;ctx.beginPath();let points=0;for(let x=left;x<(w-this.camera.x)/s&&points<20000;x+=40)for(let y=top;y<(h-this.camera.y)/s&&points<20000;y+=40){ctx.moveTo(x+1/s,y);ctx.arc(x,y,1/s,0,Math.PI*2);points++;}ctx.fillStyle=fg;ctx.globalAlpha=.2;ctx.fill();ctx.globalAlpha=1;}
-  // Rings stay live so a selection never rebuilds the layer. Labels need 60 screen pixels
-  // of image width, which no image reaches while the layer is in use.
-  const hovered=this.hover&&'endpoint'in this.hover?this.hover.endpoint:null,hoverEdge=this.hover&&'edge'in this.hover?this.hover.edge.id:null;
-  const drawn=this.shownEdges().filter(edge=>{const source=this.positions.get(edge.source.imageId),target=this.positions.get(edge.target.imageId);return source&&target&&this.spans(source,target,w,h);});
-  const steps=this.path(),highlight=new Set(steps.map(step=>step.edge.id)),filter=this.exploration?.filter??'';
-  const focus={selected:this.selected,selectedEdge:this.selectedEdge,hoveredImage:hovered?.imageId??null,hoveredEdge:hoverEdge,path:highlight,filter,exploring:Boolean(this.exploration)};
-  const edgeStyles=new Map(drawn.map(edge=>[edge.id,connectionStyle(edge,relation(edge),focus)]));
-  const activeRegions=new Set<string>();
-  for(const edge of drawn)if(edgeStyles.get(edge.id)?.label){if(edge.source.regionId)activeRegions.add(edge.source.regionId);if(edge.target.regionId)activeRegions.add(edge.target.regionId);}
-  const captionBoxes:Rect[]=[];
-  // A group reads as a group: each member keeps a thinner ring and one band holds them all.
-  const many=this.selectionImages.size>1;
-  const ring=(r:Rect,style:string,width:number)=>{ctx.strokeStyle=style;ctx.lineWidth=width/s;ctx.strokeRect(r.x,r.y,r.width,r.height);};
-  const outline=(id:string,r:Rect)=>{
-   if(this.selected.has(id))ring(r,picked,many?1.5:2);
-   else if(this.exploration?.isRoot(id))ring(r,accent,2);
-   else if(id===hovered?.imageId){ctx.globalAlpha=.55;ring(r,accent,1.5);ctx.globalAlpha=1;}
-  };
-  if(layer){const ringed=new Set(this.selected);if(this.exploration)for(const id of this.exploration.roots)ringed.add(id);if(hovered)ringed.add(hovered.imageId);
-   for(const id of ringed){const r=this.positions.get(id);if(r&&onScreen(r,this.camera,w,h))outline(id,r);}
-  }else for(const id of shown){
-   const image=this.images.get(id),r=this.positions.get(id);if(!image||!r)continue;
-   ctx.fillStyle=image.missing?missing:card;ctx.fillRect(r.x,r.y,r.width,r.height);
-   const thumb=thumbnailIds.has(id)?this.host.thumbnail(image,this.redraw,Math.max(r.width,r.height)*s*ratio):null;
-   if(thumb)ctx.drawImage(thumb,r.x,r.y,r.width,r.height);
-   else{const tile=this.host.overviewThumbnail(image,this.redraw);if(tile)ctx.drawImage(tile.source,tile.x,tile.y,tile.width,tile.height,r.x,r.y,r.width,r.height);}
-   outline(id,r);
-   if(r.width*s>60){
-    ctx.font=`${12/s}px sans-serif`;ctx.fillStyle=fg;
-    const label=(this.captions.get(id)??'Image')+(this.exploration?.pinned.has(id)?' · pinned':'');
-    const text=shortenLabel(label,r.width,t=>ctx.measureText(t).width);
-    const box={x:r.x,y:r.y+r.height+3/s,width:r.width,height:19/s};
-    if(!this.spatial().query(box).length&&!captionBoxes.some(other=>overlaps(box,other))){ctx.fillText(text,r.x,box.y+13/s);captionBoxes.push(box);}
-    if(this.exploration?.isRoot(id)){
-     const badge='Starting image',width=ctx.measureText(badge).width+12/s;
-     const box={x:r.x,y:r.y-25/s,width,height:20/s};captionBoxes.push(box);
-     ctx.fillStyle=accent;ctx.fillRect(box.x,box.y,box.width,box.height);ctx.fillStyle=bg;ctx.fillText(badge,box.x+6/s,box.y+14/s);
-    }
-   }
-  }
-  if(many){const band=this.bounds(this.selected);if(band){ctx.save();ctx.setLineDash([7/s,5/s]);ring({x:band.x-6/s,y:band.y-6/s,width:band.width+12/s,height:band.height+12/s},picked,1);ctx.restore();}}
-  const resizing=this.draft?.kind==='resize'?this.draft:null;
-  if(s>.06)for(const id of shown){const r=this.positions.get(id);if(!r)continue;for(const region of this.regionsByImage.get(id)??[]){
-   const chosen=region.id===this.selectedRegion,shape=resizing?.regionId===region.id?resizing.shape:region.shape,foreign=isForeignRegion(region);
-   const active=chosen||region.id===hovered?.regionId||activeRegions.has(region.id);
-   ctx.globalAlpha=active?1:(this.exploration?.isRoot(id) ? .2 : .12);
-   // A dashed outline is a region another plugin drew: shown here, edited there.
-   if(foreign)ctx.setLineDash([6/s,4/s]);
-   ctx.strokeStyle=chosen?picked:region.id===hovered?.regionId?regionHover:regionColour;ctx.lineWidth=(chosen?3:active?1.5:1)/s;this.shape(ctx,r,shape);ctx.stroke();ctx.globalAlpha=1;
-   if(foreign)ctx.setLineDash([]);
-   // Grips appear only where they can be gripped: eight of them inside 24 screen pixels is a smear.
-   if(chosen&&!foreign&&Math.min(r.width,r.height)*s>48){ctx.fillStyle=picked;const size=4/s;
-    for(const grip of regionHandles(shape))ctx.fillRect(r.x+grip.x*r.width-size,r.y+grip.y*r.height-size,size*2,size*2);}
-  }}
-  // Labels are collected and placed after every line is drawn, so one can see the others
-  // and none is buried under a later line.
-  const labels:LabelJob[]=[];
-  // Routing wants a settled layout: during an image drag every rectangle moves each frame,
-  // and a path recomputed per frame flickers more than a straight line offends.
-  const routing=s>.06&&drawn.length<=ImageGraphView.ROUTE_LIMIT&&this.drag?.kind!=='image';
-  this.routed=routing;
-  for(const edge of drawn){
-   const{source:a,target:b}=edgeEndpoints(edge,this.positions,this.regions),style=edgeStyles.get(edge.id)!;
-   const {alpha}=style;
-   const path=routing?this.route(edge,a,b):[a,b];
-   ctx.globalAlpha=alpha;ctx.strokeStyle=ctx.fillStyle=style.emphasized?picked:accent;ctx.lineWidth=style.width/s;
-   this.strokePath(ctx,path,s);
-   const arrow=(from:Point,to:Point)=>{const angle=Math.atan2(to.y-from.y,to.x-from.x),size=9/s;ctx.beginPath();ctx.moveTo(to.x,to.y);ctx.lineTo(to.x-size*Math.cos(angle-.45),to.y-size*Math.sin(angle-.45));ctx.lineTo(to.x-size*Math.cos(angle+.45),to.y-size*Math.sin(angle+.45));ctx.closePath();ctx.fill();};
-   if(s>.06){
-    // An arrowhead points along the segment it arrives on, not at the far end of the path.
-    if(edge.direction==='forward'||edge.direction==='both')arrow(path[path.length-2],path[path.length-1]);
-    if(edge.direction==='reverse'||edge.direction==='both')arrow(path[1],path[0]);
-    if(style.label){const middle=midpointOf(path);labels.push({text:relation(edge),a:middle.a,b:middle.b,alpha,priority:edge.id===this.selectedEdge||edge.id===hoverEdge?0:highlight.has(edge.id)?1:2});}
-   }
-  }ctx.globalAlpha=1;
-  this.drawLabels(ctx,labels,s,bg,fg,captionBoxes);
+  const ctx=this.canvas.getContext('2d');if(!ctx)return;
+  this.readHover();
+  const start=performance.now();
   const drag=this.drag;
-  if(drag?.kind==='marquee'&&drag.marquee){const band=this.band(drag.start,drag.marquee.last);ctx.save();ctx.setLineDash([6/s,4/s]);ctx.strokeStyle=picked;ctx.lineWidth=1/s;ctx.strokeRect(band.x,band.y,band.width,band.height);ctx.restore();}
-  const draft=this.draft;
-  if(draft?.kind==='region'){const r=this.positions.get(draft.imageId);if(r){ctx.strokeStyle=picked;ctx.lineWidth=2/s;this.shape(ctx,r,this.rectangle(draft.start,draft.last,r));ctx.stroke();}}
-  if(draft?.kind==='polygon'){const r=this.positions.get(draft.imageId);if(r){ctx.strokeStyle=picked;ctx.lineWidth=2/s;this.shape(ctx,r,{type:'polygon',points:draft.points});ctx.stroke();for(const [index,p]of draft.points.entries()){ctx.beginPath();ctx.arc(r.x+p.x*r.width,r.y+p.y*r.height,(index===0?6:4)/s,0,Math.PI*2);ctx.fillStyle=index===0?regionColour:picked;ctx.fill();}}}
-  ctx.restore();this.stats={visible,drawMs:performance.now()-start,frameMs:this.lastDraw?start-this.lastDraw:0};this.lastDraw=start;
+  const {visible}=this.renderer.paint(ctx,this.scene,{
+   camera:this.camera,width:this.canvas.clientWidth,height:this.canvas.clientHeight,ratio:this.win.devicePixelRatio||1,
+   palette:this.palette(),mode:this.mode,
+   hovered:this.hover&&'endpoint'in this.hover?this.hover.endpoint:null,
+   hoveredEdge:this.hover&&'edge'in this.hover?this.hover.edge.id:null,
+   dragKind:drag?.kind??null,
+   marquee:drag?.kind==='marquee'&&drag.marquee?{start:drag.start,last:drag.marquee.last}:null,
+   draft:this.draft,
+   zooming:Boolean(this.zoomCursor||this.pinch),
+   highlight:new Set(this.path().map(step=>step.edge.id)),
+  });
+  this.stats={visible,drawMs:performance.now()-start,frameMs:this.lastDraw?start-this.lastDraw:0};this.lastDraw=start;
+  const filter=this.exploration?.filter??'',steps=this.path();
   const ex=this.exploration;this.explorationControls.toggleClass('is-hidden',!ex);
   this.depthSelect.toggleClass('is-hidden',!ex?.countsHops);
   if(this.renderedWhere!==!!ex){this.renderedWhere=!!ex;
@@ -401,7 +284,17 @@ export class ImageGraphView extends ItemView {
   this.syncModeButtons();
   this.canvas.dataset.over=this.drag?'':this.grip?'grip':this.hover?'target':'';
   this.syncStatus(visible,filter);this.announce();
-  this.pathText.toggleClass('is-hidden',!ex);if(ex?.relation){this.pathText.setText(`Every connection labelled “${ex.relation}” · ${ex.graph.ids.length} image${ex.graph.ids.length===1?'':'s'}${ex.graph.capped?` · limit ${EXPLORE_LIMIT}`:''}. Choose another relation below, or Vault to leave.`);}else if(ex){const target=[...this.selected][0];this.pathText.setText(target&&!ex.isRoot(target)&&steps.length?`One shortest path · ${steps.length} hops\n`+steps.map(step=>{const e=step.edge,forward=e.source.imageId===step.from,from=forward?e.source:e.target,to=forward?e.target:e.source,arrow=e.direction==='both'?'↔':e.direction==='none'?'—':(e.direction==='forward')===forward?'→':'←';return `${this.describe(from)} ${arrow} ${relation(e)} ${arrow} ${this.describe(to)}`;}).join('\n'):ex.roots.length>1?`${ex.roots.length} starting images · select another to trace its path from the first.`:'Starting image anchored · select an image to trace its path. Links can be traversed either way.');}
+  this.pathText.toggleClass('is-hidden',!ex);if(ex?.relation){this.pathText.setText(`Every connection labelled “${ex.relation}” · ${ex.graph.ids.length} image${ex.graph.ids.length===1?'':'s'}${ex.graph.capped?` · limit ${EXPLORE_LIMIT}`:''}. Choose another relation below, or Vault to leave.`);}else if(ex){const target=[...this.selected][0];this.pathText.setText(target&&!ex.isRoot(target)&&steps.length?`One shortest path · ${steps.length} hops\n`+steps.map(step=>{const e=step.edge,forward=e.source.imageId===step.from,from=forward?e.source:e.target,to=forward?e.target:e.source,arrow=e.direction==='both'?'↔':e.direction==='none'?'—':(e.direction==='forward')===forward?'→':'←';return `${this.scene.describe(from)} ${arrow} ${relation(e)} ${arrow} ${this.scene.describe(to)}`;}).join('\n'):ex.roots.length>1?`${ex.roots.length} starting images · select another to trace its path from the first.`:'Starting image anchored · select an image to trace its path. Links can be traversed either way.');}
+ }
+ /** Every colour the canvas uses, read from the theme each frame. */
+ private palette(){
+  const css=this.win.getComputedStyle(this.contentEl),colour=(name:string,fallback:string)=>css.getPropertyValue(name).trim()||fallback;
+  return{
+   bg:colour('--background-primary','#181b20'),card:colour('--background-secondary','#333840'),
+   fg:colour('--text-normal','#ddd'),accent:colour('--interactive-accent','#7bbda8'),
+   picked:colour('--color-yellow','#ffe0a0'),region:colour('--color-green','#69dfb0'),
+   regionHover:colour('--color-cyan','#a6f5d2'),missing:colour('--background-modifier-error','#733c43'),
+  };
  }
  private syncModeBar(){
   const drawing=this.mode==='rect'||this.mode==='polygon'||this.mode==='connect',polygon=this.mode==='polygon';
@@ -418,7 +311,7 @@ export class ImageGraphView extends ItemView {
   * it printed a stray space wherever an optional part was absent. */
  private syncStatus(visible:number,filter:string){
   const ex=this.exploration;
-  const parts=[`${ex?`${ex.graph.ids.length} connected / `:''}${this.images.size.toLocaleString()} images`,`${visible.toLocaleString()} visible`];
+  const parts=[`${ex?`${ex.graph.ids.length} connected / `:''}${this.scene.images.size.toLocaleString()} images`,`${visible.toLocaleString()} visible`];
   if(ex?.relation)parts.push(`every “${ex.relation}” connection`);
   if(this.selected.size>1)parts.push(`${this.selected.size} selected`);
   parts.push(this.mode==='select'?'Drag to pan · shift-drag selects · ? lists the shortcuts'
@@ -426,7 +319,7 @@ export class ImageGraphView extends ItemView {
    :this.mode==='connect'?(this.pending?'Choose target':'Choose source')
    :this.mode==='rect'?'Drag across an image to draw a region':'Click the corners of a region');
   if(ex?.graph.capped)parts.push(`Neighborhood limit: ${EXPLORE_LIMIT}`);
-  if(filter)parts.push(`${this.shownEdges().filter(e=>relation(e)===filter).length} matching links; context dimmed`);
+  if(filter)parts.push(`${this.scene.shownEdges().filter(e=>relation(e)===filter).length} matching links; context dimmed`);
   const text=parts.join(' · ');
   if(text!==this.statusText){this.statusText=text;this.status.setText(text);}
   const zoom=`${Math.round(this.camera.scale*100)}%`;
@@ -464,149 +357,24 @@ export class ImageGraphView extends ItemView {
  findImage(){
   const images=this.snapshot.images.filter(image=>!image.missing);
   if(!images.length){new Notice('This vault has no images yet.');return;}
-  new ImagePicker(this.app,images,image=>`${this.captions.get(image.id)??''} — ${image.path}`,image=>this.reveal(image.id)).open();
+  new ImagePicker(this.app,images,image=>`${this.scene.caption(image.id)} — ${image.path}`,image=>this.reveal(image.id)).open();
  }
  /** Bring one image into view from anywhere. An exploration that does not hold it is left
   * first, because the answer to "where is this" is never "it is not on screen". */
  reveal(imageId:string):boolean{
-  if(!this.images.has(imageId))return false;
+  if(!this.scene.images.has(imageId))return false;
   if(this.exploration&&!this.exploration.positions.has(imageId))this.exitExploration();
   this.focusImage(imageId);this.canvas.focus();this.openInspectorIfOpen();return true;
  }
  private openInspectorIfOpen(){if(!this.inspector.hasClass('is-hidden'))this.renderInspector();}
- /** A label at the midpoint of a connection lands on an image about half the time. Try a few
-  * points along the line and a step to either side, and take the first that is clear of the
-  * images and of the labels already placed. */
- /** The path a connection takes: around the images between its ends where one can be found
-  * and is not a wild detour, and straight otherwise. Cached, because the answer only changes
-  * when a rectangle moves. */
- private route(edge:EdgeRecord,a:Point,b:Point):Point[]{
-  const cached=this.routes.get(edge.id);
-  if(cached!==undefined)return cached??[a,b];
-  const area={x:Math.min(a.x,b.x)-LANE*2,y:Math.min(a.y,b.y)-LANE*2,width:Math.abs(a.x-b.x)+LANE*4,height:Math.abs(a.y-b.y)+LANE*4};
-  const obstacles:Rect[]=[];
-  for(const id of this.spatial().query(area)){
-   if(id===edge.source.imageId||id===edge.target.imageId)continue;
-   const r=this.positions.get(id);if(r)obstacles.push(r);
-  }
-  const path=obstacles.length?routeOrthogonal(a,b,obstacles):null;
-  this.routes.set(edge.id,path);
-  return path??[a,b];
- }
- /** Corners are rounded so a right-angled path reads as one line rather than three. */
- private strokePath(ctx:CanvasRenderingContext2D,path:Point[],s:number){
-  ctx.beginPath();ctx.moveTo(path[0].x,path[0].y);
-  if(path.length===2){ctx.lineTo(path[1].x,path[1].y);ctx.stroke();return;}
-  let shortest=Infinity;
-  for(let i=1;i<path.length;i++)shortest=Math.min(shortest,Math.hypot(path[i].x-path[i-1].x,path[i].y-path[i-1].y));
-  const radius=Math.min(14/s,shortest/2);
-  for(let i=1;i<path.length-1;i++)ctx.arcTo(path[i].x,path[i].y,path[i+1].x,path[i+1].y,radius);
-  ctx.lineTo(path[path.length-1].x,path[path.length-1].y);ctx.stroke();
- }
- private drawLabels(ctx:CanvasRenderingContext2D,labels:LabelJob[],s:number,bg:string,fg:string,captions:Rect[]){
-  if(!labels.length)return;
-  ctx.font=`${12/s}px sans-serif`;
-  const height=20/s,taken:Rect[]=[...captions];
-  for(const label of labels.sort((a,b)=>a.priority-b.priority)){
-   const box=this.labelBox(label.a,label.b,ctx.measureText(label.text).width+8/s,height,taken);
-   if(!box)continue;
-   taken.push(box);
-   ctx.globalAlpha=label.alpha;
-   ctx.fillStyle=bg;ctx.fillRect(box.x,box.y,box.width,box.height);
-   ctx.fillStyle=fg;ctx.fillText(label.text,box.x+4/s,box.y+14/s);
-  }
-  ctx.globalAlpha=1;
- }
- private labelBox(a:Point,b:Point,width:number,height:number,taken:Rect[]):Rect|null{
-  const dx=b.x-a.x,dy=b.y-a.y,length=Math.hypot(dx,dy)||1,offX=-dy/length*height*1.15,offY=dx/length*height*1.15;
-  for(const along of [.5,.4,.6,.3,.7,.2,.8])for(const side of [0,-1,1,-2,2]){
-   const box={x:a.x+dx*along+offX*side-width/2,y:a.y+dy*along+offY*side-height/2,width,height};
-   if(this.spatial().query(box).length||taken.some(other=>overlaps(box,other)))continue;
-   const viewport=this.viewRect(this.canvas.clientWidth,this.canvas.clientHeight);
-   if(box.x<viewport.x||box.y<viewport.y||box.x+box.width>viewport.x+viewport.width||box.y+box.height>viewport.y+viewport.height)continue;
-   return box;
-  }
-  return null;
- }
- /** Atlas tiles for the whole shown set, rendered once into a bitmap that covers the viewport
-  * and a margin. Reused until the scale, the data, or the camera leaves that margin. Selection
-  * rings and labels stay outside it so a click never rebuilds it. */
- private tileLayer(w:number,h:number,ratio:number,card:string,bg:string,missing:string):TileLayer|null{
-  const margin=Math.round(Math.min(w,h)*.25*ratio)/ratio,width=w+margin*2,height=h+margin*2,doc=this.contentEl.ownerDocument;
-  const current=this.layer?.doc===doc?this.layer:this.releaseLayer();
-  if(current&&current.ratio===ratio&&current.width===width&&current.height===height&&current.camera.scale===this.camera.scale&&current.positions===this.positions&&current.version===this.layerVersion&&current.card===card&&current.bg===bg){
-   const dx=this.camera.x-current.camera.x,dy=this.camera.y-current.camera.y;
-   if(dx<=0&&dy<=0&&dx+width>=w&&dy+height>=h)return current;
-  }
-  const canvas=current?.canvas??detached(doc,'canvas');
-  canvas.width=Math.max(1,Math.round(width*ratio));canvas.height=Math.max(1,Math.round(height*ratio));
-  const ctx=canvas.getContext('2d');if(!ctx)return null;
-  const camera:Camera={scale:this.camera.scale,x:this.camera.x+margin,y:this.camera.y+margin};
-  ctx.setTransform(ratio,0,0,ratio,0,0);ctx.fillStyle=bg;ctx.fillRect(0,0,width,height);ctx.translate(camera.x,camera.y);ctx.scale(camera.scale,camera.scale);
-  for(const id of this.spatial().query(this.viewRect(width,height,camera))){
-   const image=this.images.get(id),r=this.positions.get(id);if(!image||!r)continue;
-   ctx.fillStyle=image.missing?missing:card;ctx.fillRect(r.x,r.y,r.width,r.height);
-   const tile=this.host.overviewThumbnail(image,this.redraw);
-   if(tile)ctx.drawImage(tile.source,tile.x,tile.y,tile.width,tile.height,r.x,r.y,r.width,r.height);
-  }
-  this.layer={canvas,doc,camera,width,height,ratio,positions:this.positions,version:this.layerVersion,card,bg};
-  return this.layer;
- }
  /** Drop the cached bitmap and its backing store. Returns null so a caller can rebuild. */
- private releaseLayer():null{const canvas=this.layer?.canvas;if(canvas){canvas.width=0;canvas.height=0;}this.layer=null;return null;}
- private shape(ctx:CanvasRenderingContext2D,r:Rect,shape:RegionShape){ctx.beginPath();if(shape.type==='rect')ctx.rect(r.x+shape.x*r.width,r.y+shape.y*r.height,shape.width*r.width,shape.height*r.height);else{shape.points.forEach((p,i)=>{if(i)ctx.lineTo(r.x+p.x*r.width,r.y+p.y*r.height);else ctx.moveTo(r.x+p.x*r.width,r.y+p.y*r.height);});if(shape.points.length>2)ctx.closePath();}}
  /** A connection's endpoints sit inside its two image rectangles, so their union bounds the line.
   * The margin keeps a midpoint label that overhangs the viewport, without drawing every distant edge. */
- private spans(a:Rect,b:Rect,w:number,h:number){
-  const s=this.camera.scale,margin=240;
-  const left=Math.min(a.x,b.x)*s+this.camera.x,top=Math.min(a.y,b.y)*s+this.camera.y;
-  const right=Math.max(a.x+a.width,b.x+b.width)*s+this.camera.x,bottom=Math.max(a.y+a.height,b.y+b.height)*s+this.camera.y;
-  return left<=w+margin&&top<=h+margin&&right>=-margin&&bottom>=-margin;
- }
- private world(event:{clientX:number;clientY:number}):Point{const r=this.canvas.getBoundingClientRect();return{x:(event.clientX-r.left-this.camera.x)/this.camera.scale,y:(event.clientY-r.top-this.camera.y)/this.camera.scale};}
- private endpointAt(p:Point):Endpoint|null{
-  for(const id of this.spatial().at(p)){
-   const r=this.positions.get(id);if(!r)continue;
-   const normalized={x:(p.x-r.x)/r.width,y:(p.y-r.y)/r.height};
-   for(const region of [...(this.regionsByImage.get(id)??[])].reverse())if(containsRegion(normalized,region.shape))return{imageId:id,regionId:region.id};
-   return{imageId:id};
-  }
-  return null;
- }
- /** Runs on every pointer move, so a connection whose route the last frame did not compute is
-  * rejected by its bounding box before the endpoints are resolved and the distance is measured.
-  *
-  * A routed connection is measured against the polyline the frame drew, never against the
-  * straight line between its ends. The two part company by a whole image, which put the hit
-  * box somewhere the line was not: the pointer had to rest on empty canvas to select a
-  * connection, and resting on the line itself did nothing. Only the zoom below which routing
-  * stops, and the reach that grows as the scale shrinks, hid it when zoomed far out. */
- private hit(p:Point):Hit|null{
-  const endpoint=this.endpointAt(p);if(endpoint?.regionId)return{endpoint};
-  const edges=this.shownEdges(),reach=ImageGraphView.REACH/this.camera.scale;
-  for(let i=edges.length-1;i>=0;i--){
-   const edge=edges[i];
-   const route=this.routed?this.routes.get(edge.id):null;
-   if(route){if(distanceToPath(p,route)<reach)return{edge};continue;}
-   const source=this.positions.get(edge.source.imageId),target=this.positions.get(edge.target.imageId);
-   if(!source||!target)continue;
-   if(p.x<Math.min(source.x,target.x)-reach||p.x>Math.max(source.x+source.width,target.x+target.width)+reach)continue;
-   if(p.y<Math.min(source.y,target.y)-reach||p.y>Math.max(source.y+source.height,target.y+target.height)+reach)continue;
-   const{source:a,target:b}=edgeEndpoints(edge,this.positions,this.regions);
-   if(distanceToPath(p,[a,b])<reach)return{edge};
-  }
-  return endpoint?{endpoint}:null;
- }
+ private world(event:{clientX:number;clientY:number}):Point{const r=this.canvas.getBoundingClientRect();return toWorld(this.camera,event.clientX-r.left,event.clientY-r.top);}
  private select(hit:Hit|null,multiple=false){
-  this.metadataTicket++;this.setSelection(selectTarget(this.selection,hit&&'edge'in hit?{edgeId:hit.edge.id}:hit,multiple));
+  this.metadataTicket++;this.scene.select(hit,multiple);
   if(!this.inspector.hasClass('is-hidden'))this.renderInspector();this.schedule();
  }
- private selectionHit():Hit|null{const s=this.selection;
-  if(s.kind==='edge'){const edge=this.snapshot.edges.find(e=>e.id===s.id);return edge?{edge}:null;}
-  if(s.kind==='region')return{endpoint:{imageId:s.imageId,regionId:s.regionId}};
-  const imageId=[...this.selectionImages][0];return imageId?{endpoint:{imageId}}:null;
- }
- private describe(e:Endpoint){return `${this.images.get(e.imageId)?.path.split('/').pop()??'Missing image'}${e.regionId?' / '+(this.regions.get(e.regionId)?.label??'region'):''}`;}
  private path(){const ex=this.exploration,anchor=ex?.anchor??null,target=[...this.selected][0];return ex&&anchor!==null&&target?tracePath(anchor,target,ex.graph):[];}
  private clearLongPress(){this.win.clearTimeout(this.longPress);this.longPress=undefined;}
  /** Read what the pointer rests on. Called from the frame, so it costs once per frame
@@ -622,44 +390,44 @@ export class ImageGraphView extends ItemView {
   this.grip=this.gripAt(p);
   if(this.grip){this.hover=null;return;}
   if(this.mode==='select'){this.hover=this.hit(p);return;}
-  const endpoint=this.endpointAt(p);this.hover=endpoint?{endpoint}:null;
+  const endpoint=this.scene.endpointAt(p);this.hover=endpoint?{endpoint}:null;
  }
  private pointerDown(event:PointerEvent){
   if(event.button!==0&&event.button!==1)return;this.canvas.focus();this.canvas.setPointerCapture(event.pointerId);this.pointers.set(event.pointerId,{x:event.clientX,y:event.clientY});this.clearLongPress();
-  if(this.pointers.size>1){const [a,b]=[...this.pointers.values()];this.pinch={distance:Math.hypot(a.x-b.x,a.y-b.y),center:{x:(a.x+b.x)/2,y:(a.y+b.y)/2}};this.drag=null;return;}
+  if(this.pointers.size>1){const [a,b]=[...this.pointers.values()];this.pinch=pinchFrom(a,b);this.drag=null;return;}
   // Read fresh rather than trusting the last frame's hover: a fast pointer can arrive
   // between frames, and a press must land on what is under it now.
-  const p=this.world(event),grip=this.gripAt(p),endpoint=this.endpointAt(p),hit=this.mode!=='select'||event.altKey?(endpoint?{endpoint}:null):this.hit(p);
+  const p=this.world(event),grip=this.gripAt(p),endpoint=this.scene.endpointAt(p),hit=this.mode!=='select'||event.altKey?(endpoint?{endpoint}:null):this.hit(p);
   this.drag={pointer:event.pointerId,kind:'waiting',start:p,screen:{x:event.clientX,y:event.clientY},origin:{...this.camera},hit,forcePan:this.space||event.button===1,forceMove:event.altKey||this.mode==='move'};
-  // Shift already means extend, so shift-drag draws the band. Plain drag still pans,
-  // because this canvas is a map before it is an editor. Move bands too: the selection a
-  // drag carries has to be makeable in the mode that carries it.
-  if(event.shiftKey&&!this.space&&event.button===0&&(this.mode==='select'||this.mode==='move'))this.drag.marquee={base:this.selectionImages,last:p};
-  else if(grip&&!this.space&&event.button===0){this.drag.kind='handle';this.draft={kind:'resize',...grip,shape:grip.origin};}
+  const intent=pressIntent({shift:event.shiftKey,space:this.space,button:event.button,mode:this.mode,onGrip:!!grip});
+  if(intent==='marquee')this.drag.marquee={base:this.scene.selectedImages,last:p};
+  else if(intent==='handle'&&grip){this.drag.kind='handle';this.draft={kind:'resize',...grip,shape:grip.origin};}
   if(event.pointerType==='touch')this.longPress=this.win.setTimeout(()=>{if(this.drag?.kind==='waiting'){const target=this.drag.hit;this.drag=null;this.select(target);this.menu(event,target);}},550);
  }
  private pointerMove(event:PointerEvent){
   // Hover comes first: most moves carry no button, and the guard below drops those.
   if(!this.drag||this.drag.kind==='waiting'){this.hoverPoint={clientX:event.clientX,clientY:event.clientY};this.schedule();}
   if(!this.pointers.has(event.pointerId))return;this.pointers.set(event.pointerId,{x:event.clientX,y:event.clientY});
-  if(this.pointers.size>1){this.clearLongPress();const [a,b]=[...this.pointers.values()],center={x:(a.x+b.x)/2,y:(a.y+b.y)/2},length=Math.hypot(a.x-b.x,a.y-b.y);if(this.pinch){this.zoomAt(length/(this.pinch.distance||1),this.pinch.center);this.camera.x+=center.x-this.pinch.center.x;this.camera.y+=center.y-this.pinch.center.y;}this.pinch={distance:length,center};this.schedule();return;}
+  if(this.pointers.size>1){
+   this.clearLongPress();const [a,b]=[...this.pointers.values()];
+   const step=pinchStep(this.pinch??pinchFrom(a,b),a,b);
+   // The zoom is about where the fingers were; the slide then follows them, which is the
+   // opposite sense to a scroll.
+   if(this.pinch){this.zoomAt(step.factor,this.pinch.center);this.camera=scrollBy(this.camera,-step.dx,-step.dy);}
+   this.pinch=step.next;this.schedule();return;}
   const p=this.world(event),drag=this.drag;
   if(!drag||drag.pointer!==event.pointerId)return;
   if(drag.kind==='waiting'){
-   if(Math.hypot(event.clientX-drag.screen.x,event.clientY-drag.screen.y)<6)return;this.clearLongPress();
-   if(drag.marquee)drag.kind='marquee';
-   else if(drag.forcePan||!drag.hit||'edge'in drag.hit)drag.kind='pan';
-   else if(this.mode==='rect'){drag.kind='region';drag.imageId=drag.hit.endpoint.imageId;this.draft={kind:'region',imageId:drag.imageId,start:drag.start,last:p};this.select(drag.hit);}
-   // Dragging while connecting or drawing a polygon pans, so the owner can reach an
-   // off-screen target without leaving the tool. It was a tracked gesture that did nothing.
-   else if(this.mode==='connect'||this.mode==='polygon')drag.kind='pan';
-   else if(drag.forceMove){drag.kind='image';drag.imageId=drag.hit.endpoint.imageId;if(!this.selected.has(drag.imageId))this.select(drag.hit);drag.origins=this.movable(drag.imageId);}
-   else drag.kind='pan';
+   if(!movedEnough(drag.screen,{x:event.clientX,y:event.clientY}))return;this.clearLongPress();
+   const over=drag.hit?('edge'in drag.hit?'edge':'image'):null;
+   drag.kind=dragBecomes({marquee:!!drag.marquee,forcePan:drag.forcePan,forceMove:drag.forceMove,over,mode:this.mode});
+   if(drag.kind==='region'&&drag.hit&&'endpoint'in drag.hit){drag.imageId=drag.hit.endpoint.imageId;this.draft={kind:'region',imageId:drag.imageId,start:drag.start,last:p};this.select(drag.hit);}
+   else if(drag.kind==='image'&&drag.hit&&'endpoint'in drag.hit){drag.imageId=drag.hit.endpoint.imageId;if(!this.selected.has(drag.imageId))this.select(drag.hit);drag.origins=this.scene.movable(drag.imageId);}
   }
-  if(drag.kind==='pan'){this.camera.x=drag.origin.x+event.clientX-drag.screen.x;this.camera.y=drag.origin.y+event.clientY-drag.screen.y;}
+  if(drag.kind==='pan')this.camera={...this.camera,x:drag.origin.x+event.clientX-drag.screen.x,y:drag.origin.y+event.clientY-drag.screen.y};
   else if(drag.kind==='image'&&drag.origins){const dx=p.x-drag.start.x,dy=p.y-drag.start.y;
-   for(const [id,rect] of drag.origins)this.place(id,rect.x+dx,rect.y+dy,rect);this.indexVersion++;}
-  else if(drag.kind==='marquee'&&drag.marquee){drag.marquee.last=p;this.setSelection(imageSelection([...drag.marquee.base,...this.spatial().query(this.band(drag.start,p))]));}
+   for(const [id,rect] of drag.origins)this.scene.place(id,rect.x+dx,rect.y+dy,rect);this.scene.moved();}
+  else if(drag.kind==='marquee'&&drag.marquee){drag.marquee.last=p;this.setSelection(imageSelection([...drag.marquee.base,...this.scene.spatial().query(rectBetween(drag.start,p))]));}
   else if(drag.kind==='handle'&&this.draft?.kind==='resize'){const resize=this.draft,r=this.positions.get(resize.imageId);
    if(r)resize.shape=resizeRegion(resize.origin,resize.handle,{x:(p.x-r.x)/r.width,y:(p.y-r.y)/r.height});}
   else if(drag.kind==='region'&&this.draft?.kind==='region')this.draft.last=p;this.schedule();
@@ -671,49 +439,24 @@ export class ImageGraphView extends ItemView {
    if(this.mode==='connect'&&drag.hit&&'endpoint'in drag.hit)this.connect(drag.hit.endpoint);
    else if(this.mode==='polygon'&&drag.hit&&'endpoint'in drag.hit){const imageId=drag.hit.endpoint.imageId,r=this.positions.get(imageId)!;if(!this.draft)this.draft={kind:'polygon',imageId,points:[]};const polygon=this.polygon;if(polygon?.imageId===imageId){const p=this.world(event),point={x:clamp((p.x-r.x)/r.width,0,1),y:clamp((p.y-r.y)/r.height,0,1)},first=polygon.points[0],last=polygon.points.at(-1);if(first&&polygon.points.length>=3&&Math.hypot((point.x-first.x)*r.width,(point.y-first.y)*r.height)*this.camera.scale<10)this.finishPolygon();else if(!last||Math.hypot((point.x-last.x)*r.width,(point.y-last.y)*r.height)*this.camera.scale>3)polygon.points.push(point);this.setSelection(imageSelection([imageId]));}}
    else this.select(drag.hit,event.shiftKey);
-  }else if(drag.kind==='image'&&drag.origins){const moved=this.movedRecords(drag.origins.keys());this.layerVersion++;
+  }else if(drag.kind==='image'&&drag.origins){const moved=this.scene.movedRecords(drag.origins.keys());this.renderer.invalidate();
    if(!this.exploration&&moved.length)this.run(()=>this.host.updateImages(moved));}
   else if(drag.kind==='marquee'&&!this.inspector.hasClass('is-hidden'))this.renderInspector();
-  else if(drag.kind==='handle'&&this.draft?.kind==='resize'){const resize=this.draft;this.draft=null;const region=this.regions.get(resize.regionId);
+  else if(drag.kind==='handle'&&this.draft?.kind==='resize'){const resize=this.draft;this.draft=null;const region=this.scene.regions.get(resize.regionId);
    if(region&&JSON.stringify(region.shape)!==JSON.stringify(resize.shape))this.run(()=>this.host.saveRegion({...region,shape:resize.shape}));}
-  else if(drag.kind==='region'&&this.draft?.kind==='region'){const d=this.draft,r=this.positions.get(d.imageId)!;this.draft=null;const shape=this.rectangle(d.start,d.last,r);if(shape.width*r.width*this.camera.scale>4&&shape.height*r.height*this.camera.scale>4)this.createRegion(d.imageId,shape);}
+  else if(drag.kind==='region'&&this.draft?.kind==='region'){const d=this.draft,r=this.positions.get(d.imageId)!;this.draft=null;const shape=regionFromDrag(d.start,d.last,r);if(shape.width*r.width*this.camera.scale>4&&shape.height*r.height*this.camera.scale>4)this.createRegion(d.imageId,shape);}
   this.schedule();
- }
- /** Every moved rectangle, read before anything is written. A write notifies, refresh()
-  * rebuilds the position map from the snapshot, and a second read would then return the
-  * stored rectangle rather than the dragged one — which moved only the first image. */
- private movedRecords(ids:Iterable<string>):ImageRecord[]{
-  const records:ImageRecord[]=[];
-  for(const id of ids){const image=this.images.get(id),r=this.positions.get(id);if(image&&r)records.push({...image,...r,pinned:true});}
-  return records;
  }
  private syncModeButtons(){
   if(this.renderedMode===this.mode)return;this.renderedMode=this.mode;
   for(const {button,mode} of this.modeButtons){button.toggleClass('is-active',mode===this.mode);button.setAttribute('aria-pressed',String(mode===this.mode));}
  }
- /** The images a drag on `imageId` carries: the whole selection when it is part of it. */
- private movable(imageId:string):Map<string,Rect>{
-  const ids=this.selected.has(imageId)?[...this.selected]:[imageId],origins=new Map<string,Rect>();
-  const ex=this.exploration;
-  for(const id of ids){const r=this.positions.get(id);if(r&&!ex?.isRoot(id))origins.set(id,copy(r));}
-  return origins;
- }
- /** Whole-vault positions snap to the 40px grid; an explored layout is free and stays pinned. */
- private place(id:string,x:number,y:number,size:Rect){
-  // The drag carries a delta, not a size: a pixel size read while the pointer is down
-  // changes the rectangle's width, and the drop must write the new width, not the old one.
-  const current=this.positions.get(id)??size;
-  this.positions.set(id,{width:current.width,height:current.height,x:this.exploration?x:Math.round(x/40)*40,y:this.exploration?y:Math.round(y/40)*40});
-  this.exploration?.pin(id);
- }
  /** The rectangle holding every one of `ids`, or null when none of them is placed. */
- private bounds(ids:Iterable<string>):Rect|null{return boundsOf(this.placed(ids));}
- private *placed(ids:Iterable<string>):Generator<Rect>{for(const id of ids){const r=this.positions.get(id);if(r)yield r;}}
  /** The grip of the selected region under `p`, if the pointer is close enough to one. */
  private grip:{regionId:string;imageId:string;handle:HandleId;origin:RegionShape}|null=null;
  private gripAt(p:Point){
   const selection=this.selection;if(selection.kind!=='region'||this.mode!=='select')return null;
-  const region=this.regions.get(selection.regionId),r=this.positions.get(selection.imageId);if(!region||!r||isForeignRegion(region))return null;
+  const region=this.scene.regions.get(selection.regionId),r=this.positions.get(selection.imageId);if(!region||!r||isForeignRegion(region))return null;
   if(Math.min(r.width,r.height)*this.camera.scale<=48)return null;
   const reach=8/this.camera.scale;
   for(const grip of regionHandles(region.shape)){
@@ -722,8 +465,6 @@ export class ImageGraphView extends ItemView {
   }
   return null;
  }
- private band(a:Point,b:Point):Rect{return{x:Math.min(a.x,b.x),y:Math.min(a.y,b.y),width:Math.abs(a.x-b.x),height:Math.abs(a.y-b.y)};}
- private rectangle(a:Point,b:Point,r:Rect):RegionShape&{type:'rect'}{const x1=clamp((a.x-r.x)/r.width,0,1),x2=clamp((b.x-r.x)/r.width,0,1),y1=clamp((a.y-r.y)/r.height,0,1),y2=clamp((b.y-r.y)/r.height,0,1);return{type:'rect',x:Math.min(x1,x2),y:Math.min(y1,y2),width:Math.abs(x2-x1),height:Math.abs(y2-y1)};}
  private createRegion(imageId:string,shape:RegionShape){const region:RegionRecord={id:newId('region'),imageId,label:'Region',shape,properties:{}};this.mode='select';this.draft=null;this.run(async()=>{await this.host.saveRegion(region);this.select({endpoint:{imageId,regionId:region.id}});this.openInspector();});}
  private finishPolygon(){const polygon=this.polygon;if(polygon&&polygon.points.length>=3){const points=polygon.points,area=Math.abs(points.reduce((sum,p,i)=>{const q=points[(i+1)%points.length];return sum+p.x*q.y-q.x*p.y;},0))/2;if(area<.00001){new Notice('Choose polygon corners that enclose an area.');return;}this.createRegion(polygon.imageId,{type:'polygon',points:[...points]});}else new Notice('Select at least three polygon points.');}
  private connect(endpoint:Endpoint){const source=this.pending;if(!source){this.draft={kind:'connect',source:endpoint};this.schedule();return;}if(source.imageId===endpoint.imageId&&source.regionId===endpoint.regionId){new Notice('Choose a different endpoint.');return;}const edge:EdgeRecord={id:newId('edge'),source,target:endpoint,direction:'none',properties:{relation:'related to'}};this.draft=null;this.mode='select';this.run(async()=>{await this.host.saveEdge(edge);this.select({edge});this.openInspector();});}
@@ -735,19 +476,15 @@ export class ImageGraphView extends ItemView {
   * could not pan at all. deltaMode is normalised: Firefox reports lines, not pixels. */
  private wheel(event:WheelEvent){
   event.preventDefault();
-  const unit=event.deltaMode===1?16:event.deltaMode===2?this.canvas.clientHeight:1;
-  let dx=event.deltaX*unit,dy=event.deltaY*unit;
-  if(event.ctrlKey||event.metaKey){
-   this.zoomCursor=dy<0?'zoom-in':'zoom-out';this.win.clearTimeout(this.zoomTimer);
+  const gesture=wheelGesture(event,this.canvas.clientHeight);
+  if(gesture.kind==='zoom'){
+   this.zoomCursor=gesture.into?'zoom-in':'zoom-out';this.win.clearTimeout(this.zoomTimer);
    this.zoomTimer=this.win.setTimeout(()=>{this.zoomCursor=null;this.schedule();},180);
-   this.zoomAt(Math.exp(-dy*.0015),{x:event.clientX,y:event.clientY});return;
+   this.zoomAt(gesture.factor,{x:event.clientX,y:event.clientY});return;
   }
-  // A wheel with no horizontal axis pans sideways while shift is held. A trackpad already
-  // sends deltaX there, so only the wheel needs the remap.
-  if(event.shiftKey&&!dx){dx=dy;dy=0;}
-  this.camera.x-=dx;this.camera.y-=dy;this.schedule();
+  this.camera=scrollBy(this.camera,gesture.dx,gesture.dy);this.schedule();
  }
- private zoomAt(factor:number,client:Point){const before=this.world({clientX:client.x,clientY:client.y}),old=this.camera.scale;this.camera.scale=clamp(old*factor,.002,8);this.camera.x+=(old-this.camera.scale)*before.x;this.camera.y+=(old-this.camera.scale)*before.y;this.schedule();}
+ private zoomAt(factor:number,client:Point){const r=this.canvas.getBoundingClientRect();this.camera=zoomCameraAt(this.camera,factor,{x:client.x-r.left,y:client.y-r.top});this.schedule();}
  private keydown(event:KeyboardEvent){
   if(event.code==='Space'){this.space=true;event.preventDefault();return;}
   const command=commandFor(event);if(!command)return;
@@ -760,7 +497,7 @@ export class ImageGraphView extends ItemView {
   switch(command.kind){
    case'cancel':return this.cancel();
    case'mode':return this.setMode(command.mode);
-   case'connect':{const hit=this.selectionHit();return this.beginConnect(hit&&'endpoint'in hit?hit.endpoint:undefined);}
+   case'connect':{const hit=this.scene.selectionHit();return this.beginConnect(hit&&'endpoint'in hit?hit.endpoint:undefined);}
    case'explore':return this.exploreSelection();
    case'expand':if(imageId)this.expandImage(imageId);return;
    case'pin':if(imageId)this.pinImage(imageId);return;
@@ -769,16 +506,12 @@ export class ImageGraphView extends ItemView {
    case'zoom':return this.zoomPreset(command.to);
    case'finish':if(this.mode==='polygon')this.finishPolygon();return;
    case'delete':if(this.mode==='polygon'){this.polygon?.points.pop();this.schedule();}else this.removeSelected();return;
-   case'menu':{const r=this.canvas.getBoundingClientRect();return this.menu({clientX:r.left+40,clientY:r.top+40},this.selectionHit());}
+   case'menu':{const r=this.canvas.getBoundingClientRect();return this.menu({clientX:r.left+40,clientY:r.top+40},this.scene.selectionHit());}
    case'help':return this.showShortcuts();
    case'undo':return this.run(()=>this.host.undo());
    case'redo':return this.run(()=>this.host.redo());
    case'nudge':return this.mode==='move'||!this.selected.size?this.nudge(command.dx,command.dy):this.travel(command.dx,command.dy,command.far);
   }
- }
- /** Every shown rectangle, for a search that has no box to query. */
- private *shownRects():Generator<readonly [string,Rect]>{
-  for(const id of this.shownIds()){const r=this.positions.get(id);if(r)yield [id,r] as const;}
  }
  /**
   * Walk the selection from image to image. This is the canvas's only keyboard travel: Tab
@@ -788,7 +521,7 @@ export class ImageGraphView extends ItemView {
  private travel(dx:number,dy:number,far:boolean){
   const from=[...this.selected].map(id=>this.positions.get(id)).filter((r):r is Rect=>!!r).at(-1);
   if(!from)return this.nudge(dx,dy);
-  const next=neighbourInDirection(from,this.shownRects(),Math.sign(dx),Math.sign(dy));
+  const next=neighbourInDirection(from,this.scene.shownRects(),Math.sign(dx),Math.sign(dy));
   if(!next){new Notice('No image that way.');return;}
   this.setSelection(imageSelection(far?[...this.selected,next]:[next]));
   const r=this.positions.get(next);if(r)this.bringIntoView(r);
@@ -796,25 +529,23 @@ export class ImageGraphView extends ItemView {
  }
  /** Scroll just enough, and keep the zoom. Flying to each image in turn is not travel. */
  private bringIntoView(r:Rect){
-  const s=this.camera.scale,w=this.canvas.clientWidth,h=this.canvas.clientHeight,pad=48,foot=pad+40;
-  const left=this.camera.x+r.x*s,top=this.camera.y+r.y*s,right=left+r.width*s,bottom=top+r.height*s;
-  if(left<pad)this.camera.x+=pad-left;else if(right>w-pad)this.camera.x-=right-(w-pad);
-  if(top<pad)this.camera.y+=pad-top;else if(bottom>h-foot)this.camera.y-=bottom-(h-foot);
+  const pad=48;
+  this.camera=scrollIntoView(this.camera,r,{width:this.canvas.clientWidth,height:this.canvas.clientHeight},pad,pad+40);
   this.schedule();
  }
  /** Move every selected image by one step, and write the new whole-vault positions. */
  private nudge(dx:number,dy:number){
   const origins=[...this.selected];
   // With nothing selected the arrows walk the camera, which is what a map should do.
-  if(!origins.length){this.camera.x-=dx;this.camera.y-=dy;this.schedule();return;}
-  for(const id of origins){const r=this.positions.get(id);if(r&&!this.exploration?.isRoot(id))this.place(id,r.x+dx,r.y+dy,r);}
-  this.indexVersion++;this.layerVersion++;
-  if(!this.exploration){const moved=this.movedRecords(origins);if(moved.length)this.run(()=>this.host.updateImages(moved));}
+  if(!origins.length){this.camera=scrollBy(this.camera,dx,dy);this.schedule();return;}
+  for(const id of origins){const r=this.positions.get(id);if(r&&!this.exploration?.isRoot(id))this.scene.place(id,r.x+dx,r.y+dy,r);}
+  this.scene.moved();this.renderer.invalidate();
+  if(!this.exploration){const moved=this.scene.movedRecords(origins);if(moved.length)this.run(()=>this.host.updateImages(moved));}
   this.schedule();
  }
  private zoomPreset(to:'reset'|'all'|'selection'){
   if(to==='all')return this.fit();
-  if(to==='selection'){const band=this.bounds(this.selected);if(!band)return void new Notice('Select an image to zoom to it.');return this.fit(band);}
+  if(to==='selection'){const band=this.scene.bounds(this.selected);if(!band)return void new Notice('Select an image to zoom to it.');return this.fit(band);}
   const r=this.canvas.getBoundingClientRect();this.zoomAt(1/this.camera.scale,{x:r.left+r.width/2,y:r.top+r.height/2});
  }
  private showShortcuts(){
@@ -833,7 +564,7 @@ export class ImageGraphView extends ItemView {
   if(hit&&'endpoint'in hit){const e=hit.endpoint;item('Explore connections',()=>this.exploreImage(e.imageId));if(this.exploration){item('Expand neighbors',()=>this.expandImage(e.imageId));item(this.exploration.pinned.has(e.imageId)?'Unpin image':'Pin image',()=>this.pinImage(e.imageId));}
    item('Move image',()=>{this.select(hit);this.setMode('move');});item('Connect from here',()=>this.beginConnect(e));item('Properties',()=>this.openInspector());item('Open image',()=>this.run(()=>this.host.openImage(e.imageId)));item('Open companion note',()=>this.run(()=>this.host.openCompanion(e.imageId)));
    if(this.host.annotationAvailable())item('Annotate in Image Annotation',()=>this.run(()=>this.host.annotateInAnnotation(e.imageId)));
-   if(e.regionId){const regionId=e.regionId,region=this.regions.get(regionId);item('Create image from region',()=>this.run(()=>this.host.extractRegion(regionId)));
+   if(e.regionId){const regionId=e.regionId,region=this.scene.regions.get(regionId);item('Create image from region',()=>this.run(()=>this.host.extractRegion(regionId)));
     if(region&&isForeignRegion(region)){if(this.host.annotationAvailable())item('Open in Image Annotation',()=>this.run(()=>this.host.openInAnnotation(regionId)));}
     else item('Delete region and its connections',()=>this.run(()=>this.host.deleteRegion(regionId)));}
   }else if(hit){const name=relationOf(hit.edge.properties);if(name)item(`Explore every “${name}” connection`,()=>this.exploreRelation(name));item('Connection properties',()=>this.openInspector());item('Delete connection',()=>this.run(()=>this.host.deleteEdge(hit.edge.id)));}
@@ -865,7 +596,7 @@ export class ImageGraphView extends ItemView {
   const ex=this.exploration;
   if(ex?.relation)return noteBlock({path:null,relation:ex.relation,depth:ex.depth});
   const anchor=ex?.roots[0]??(hit&&'endpoint'in hit?hit.endpoint.imageId:[...this.selected][0]);
-  const image=anchor?this.images.get(anchor):undefined;
+  const image=anchor?this.scene.images.get(anchor):undefined;
   return image?noteBlock({path:image.path,relation:null,depth:ex?.depth??1}):null;
  }
  private removeSelected(){const s=this.selection;
@@ -878,11 +609,11 @@ export class ImageGraphView extends ItemView {
  private toggleInspector(){if(this.inspector.hasClass('is-hidden'))this.openInspector();else{this.metadataTicket++;this.inspector.addClass('is-hidden');}}
  private renderInspector(){
   const ticket=++this.metadataTicket;for(const builder of this.propertyBuilders)builder.dispose();this.propertyBuilders=[];this.inspector.empty();const head=this.inspector.createDiv({cls:'image-graph-inspector-head'});head.createSpan({text:'Properties'});const close=head.createEl('button',{text:'×',attr:{'aria-label':'Close properties'}});close.onclick=()=>{this.metadataTicket++;this.inspector.addClass('is-hidden');};
-  const edge=this.snapshot.edges.find(e=>e.id===this.selectedEdge);if(edge){this.inspector.createEl('p',{text:`${this.describe(edge.source)} → ${this.describe(edge.target)}`});this.inspector.createEl('label',{text:'Arrow direction'});const select=this.inspector.createEl('select');for(const [value,text]of [['none','None'],['forward','Source → target'],['reverse','Source ← target'],['both','Both directions']])select.createEl('option',{attr:{value},text});select.value=edge.direction;this.inspector.createEl('p',{text:'Describe the connection in relation, for example “resembles”. This text appears beside the line.'});this.propertyEditor('Connection details',edge.properties,async props=>{if(!relationOf(props))throw new Error('Describe the connection in relation, as text, for example “resembles”.');await this.host.saveEdge({...edge,direction:select.value as Direction,properties:props});});return;}
-  const region=this.selectedRegion?this.regions.get(this.selectedRegion):undefined;
+  const edge=this.snapshot.edges.find(e=>e.id===this.selectedEdge);if(edge){this.inspector.createEl('p',{text:`${this.scene.describe(edge.source)} → ${this.scene.describe(edge.target)}`});this.inspector.createEl('label',{text:'Arrow direction'});const select=this.inspector.createEl('select');for(const [value,text]of [['none','None'],['forward','Source → target'],['reverse','Source ← target'],['both','Both directions']])select.createEl('option',{attr:{value},text});select.value=edge.direction;this.inspector.createEl('p',{text:'Describe the connection in relation, for example “resembles”. This text appears beside the line.'});this.propertyEditor('Connection details',edge.properties,async props=>{if(!relationOf(props))throw new Error('Describe the connection in relation, as text, for example “resembles”.');await this.host.saveEdge({...edge,direction:select.value as Direction,properties:props});});return;}
+  const region=this.selectedRegion?this.scene.regions.get(this.selectedRegion):undefined;
   if(region&&isForeignRegion(region)){this.foreignInspector(region);return;}
   if(region){this.inspector.createEl('label',{text:'Region label'});const label=this.inspector.createEl('input');label.value=region.label;const geometry=this.inspector.createEl('details');geometry.createEl('summary',{text:'Region geometry'});const shape=this.geometryEditor(geometry,region.shape);this.propertyEditor('Region properties',region.properties,async props=>{await this.host.saveRegion({...region,label:label.value,shape:shape.getShape(),properties:props});});return;}
-  const imageId=[...this.selected][0],image=imageId?this.images.get(imageId):undefined;if(!image){this.inspector.createEl('p',{cls:'image-graph-empty-inspector',text:'Select an image, region, or connection.'});return;}
+  const imageId=[...this.selected][0],image=imageId?this.scene.images.get(imageId):undefined;if(!image){this.inspector.createEl('p',{cls:'image-graph-empty-inspector',text:'Select an image, region, or connection.'});return;}
   // One image is edited at a time. Say which, rather than let a selection of forty look like one.
   if(this.selected.size>1)this.inspector.createEl('p',{cls:'image-graph-inspector-title',text:`${this.selected.size} images selected · editing one of them`});
   this.inspector.createEl('p',{text:image.path});const open=this.inspector.createEl('button',{text:'Open companion note'});open.onclick=()=>this.run(()=>this.host.openCompanion(imageId));
@@ -935,7 +666,7 @@ export class ImageGraphView extends ItemView {
   });};
  }
 
- focusImage(imageId:string){const r=this.positions.get(imageId)??this.images.get(imageId);if(!r)return;this.setSelection(imageSelection([imageId]));const scale=Math.min(1.8,(this.canvas.clientWidth-80)/r.width,(this.canvas.clientHeight-100)/r.height);this.camera={scale:Math.max(.01,scale),x:this.canvas.clientWidth/2-(r.x+r.width/2)*scale,y:this.canvas.clientHeight/2-(r.y+r.height/2)*scale};this.schedule();}
+ focusImage(imageId:string){const r=this.positions.get(imageId)??this.scene.images.get(imageId);if(!r)return;this.setSelection(imageSelection([imageId]));const scale=Math.min(1.8,(this.canvas.clientWidth-80)/r.width,(this.canvas.clientHeight-100)/r.height);this.camera={scale:Math.max(.01,scale),x:this.canvas.clientWidth/2-(r.x+r.width/2)*scale,y:this.canvas.clientHeight/2-(r.y+r.height/2)*scale};this.schedule();}
  revealExtracted(imageId:string,parentImageId:string){this.refresh();if(this.exploration){this.exploration.expand(parentImageId);this.rebuild(false);}this.focusImage(imageId);}
  /** Explore whatever is chosen. A connection is a thing a person pointed at, so it means the
   * two pictures it joins — `Explore every “…” connection` is the relation, and it says so. */
@@ -985,23 +716,20 @@ export class ImageGraphView extends ItemView {
  }
  expandImage(imageId:string){const ex=this.exploration;if(!ex){this.exploreImage(imageId);return;}ex.expand(imageId);this.rebuild(true);}
  pinImage(imageId:string){const ex=this.exploration;if(!ex||ex.isRoot(imageId))return;ex.togglePin(imageId);this.schedule();}
- private rebuild(refit:boolean){const ex=this.exploration;if(!ex)return;
-  ex.rebuild(this.snapshot);this.indexVersion++;this.pruneSelection(id=>ex.positions.has(id));if(refit)this.fit();this.schedule();}
+ private rebuild(refit:boolean){if(!this.exploration)return;
+  this.scene.rebuildExploration();if(refit)this.fit();this.schedule();}
  exitExploration(){const ex=this.exploration;if(!ex)return;this.camera={...ex.savedCamera};this.exploration=null;this.setSelection(keepImages(this.selection));this.cancel();this.schedule();}
  private fit(box?:Rect|null){
   const anchor=this.exploration?.anchor??null;const root=!box&&anchor?this.positions.get(anchor):null;
-  box=box??this.bounds(this.positions.keys());
+  box=box??this.scene.bounds(this.positions.keys());
   if(!box)return;
-  const w=this.canvas.clientWidth||800,h=this.canvas.clientHeight||600;
-  if(root){
-   const x=root.x+root.width/2,y=root.y+root.height/2;
-   const width=2*Math.max(x-box.x,box.x+box.width-x),height=2*Math.max(y-box.y,box.y+box.height-y);
-   const scale=clamp(Math.min((w-100)/(width+100),(h-160)/(height+100)),.002,2);
-   this.camera={scale,x:w/2-x*scale,y:(h-35)/2-y*scale};this.schedule();return;
-  }
-  const scale=clamp(Math.min((w-80)/(box.width+100),(h-150)/(box.height+100)),.002,2);
-  this.camera={scale,x:w/2-(box.x+box.width/2)*scale,y:(h-35)/2-(box.y+box.height/2)*scale};this.schedule();
+  const viewport={width:this.canvas.clientWidth||800,height:this.canvas.clientHeight||600};
+  // An anchored neighbourhood keeps its starting picture in the middle, so the camera has to
+  // reach as far past it as the furthest image on the other side does.
+  const centred=root?boxAround({x:root.x+root.width/2,y:root.y+root.height/2},box):box;
+  this.camera=fitBox(centred,viewport,{padX:root?100:80,padY:root?160:150,margin:FIT_MARGIN,bottomInset:FOOTER_BAND,maxScale:MAX_FIT_SCALE});
+  this.schedule();
  }
- frame(scope:'current'|'selected'|'whole'='current'):ViewFrame{const imageIds=scope==='whole'?this.snapshot.images.map(i=>i.id):scope==='selected'?[...this.selected]:[...this.shownIds()],ids=new Set(imageIds),positions:Record<string,Rect>={};for(const imageId of imageIds){const r=scope==='whole'?this.wholePositions.get(imageId):this.positions.get(imageId);if(r)positions[imageId]=copy(r);}const edgeIds=(scope==='whole'?this.snapshot.edges:this.shownEdges()).filter(e=>ids.has(e.source.imageId)&&ids.has(e.target.imageId)).map(e=>e.id);return{imageIds,edgeIds,positions,camera:{...this.camera},width:this.canvas.clientWidth,height:this.canvas.clientHeight};}
- debugState(){return{camera:{...this.camera},selection:this.selection.kind,selected:[...this.selected],selectedRegion:this.selectedRegion,selectedEdge:this.selectedEdge,mode:this.mode,draft:this.draft?.kind??null,pending:this.pending,imageCount:this.images.size,stats:{...this.stats},exploration:this.exploration?{roots:[...this.exploration.roots],relation:this.exploration.relation,depth:this.exploration.depth,ids:this.exploration.graph.ids,pinned:[...this.exploration.pinned],capped:this.exploration.graph.capped}:null,frame:this.frame()};}
+ frame(scope:'current'|'selected'|'whole'='current'):ViewFrame{const imageIds=scope==='whole'?this.snapshot.images.map(i=>i.id):scope==='selected'?[...this.selected]:[...this.scene.shownIds()],ids=new Set(imageIds),positions:Record<string,Rect>={};for(const imageId of imageIds){const r=scope==='whole'?this.scene.wholeLayout.get(imageId):this.positions.get(imageId);if(r)positions[imageId]=copy(r);}const edgeIds=(scope==='whole'?this.snapshot.edges:this.scene.shownEdges()).filter(e=>ids.has(e.source.imageId)&&ids.has(e.target.imageId)).map(e=>e.id);return{imageIds,edgeIds,positions,camera:{...this.camera},width:this.canvas.clientWidth,height:this.canvas.clientHeight};}
+ debugState(){return{camera:{...this.camera},selection:this.selection.kind,selected:[...this.selected],selectedRegion:this.selectedRegion,selectedEdge:this.selectedEdge,mode:this.mode,draft:this.draft?.kind??null,pending:this.pending,imageCount:this.scene.images.size,stats:{...this.stats},exploration:this.exploration?{roots:[...this.exploration.roots],relation:this.exploration.relation,depth:this.exploration.depth,ids:this.exploration.graph.ids,pinned:[...this.exploration.pinned],capped:this.exploration.graph.capped}:null,frame:this.frame()};}
 }

@@ -1,5 +1,6 @@
 import type {GraphSnapshot, ImageRecord, Rect} from './types';
 import {forceLayout, neighborhood, relationNeighborhood} from './graph';
+import {fitBox} from './camera';
 import {boundsOf} from './geometry';
 import {imageCaptions} from './presentation';
 import {DEFAULT_PALETTE, renderScene, themePalette} from './render';
@@ -13,6 +14,8 @@ const MIN_HEIGHT = 120, MAX_HEIGHT = 900, DEFAULT_HEIGHT = 360;
 /** Few enough to stay legible in a block. A glance, not a map: the footer says how many
  * there are in full, and the button opens the workspace where they all fit. */
 const EMBED_LIMIT = 16;
+/** Room under the pictures for their captions. */
+const CAPTION_BAND = 18;
 
 /**
  * What a note asked for.
@@ -59,10 +62,10 @@ export interface EmbedHost {
  exploreRelation(relation: string): Promise<void>;
 }
 
-/** The camera that shows all of `box` inside `width` by `height`, with room for captions. */
+/** The camera that shows all of `box` inside `width` by `height`, with room for captions.
+ * A block is a glance, so it zooms less far in than the workspace and further out. */
 export function fitCamera(box: Rect, width: number, height: number, pad = 28) {
- const scale = Math.min(1.2, Math.max(.02, Math.min((width - pad * 2) / Math.max(1, box.width), (height - pad * 2 - 18) / Math.max(1, box.height))));
- return {scale, x: width / 2 - (box.x + box.width / 2) * scale, y: (height - 18) / 2 - (box.y + box.height / 2) * scale};
+ return fitBox(box, {width, height}, {padX: pad * 2, padY: pad * 2 + CAPTION_BAND, bottomInset: CAPTION_BAND, minScale: .02, maxScale: 1.2});
 }
 
 /**

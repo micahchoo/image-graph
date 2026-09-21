@@ -29,6 +29,11 @@ export function onScreen(rect: Rect, camera: Camera, width: number, height: numb
   && left + rect.width * camera.scale >= -margin && top + rect.height * camera.scale >= -margin;
 }
 
+/** The rectangle two points span. A band drag names its corners in whatever order it likes. */
+export function rectBetween(a: {x: number; y: number}, b: {x: number; y: number}): Rect {
+ return {x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), width: Math.abs(a.x - b.x), height: Math.abs(a.y - b.y)};
+}
+
 /** The smallest rectangle holding every one of them, or null when there are none. */
 export function boundsOf(rects: Iterable<Rect>): Rect | null {
  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;

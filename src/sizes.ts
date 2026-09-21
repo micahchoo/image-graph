@@ -3,8 +3,9 @@ import type {PixelSize} from './dimensions';
 import {readImageSize} from './dimensions';
 import type {ImageRecord} from './types';
 import type {JobHandle, Jobs} from './jobs';
+import {THUMBNAILS_ROOT, ensureFolder} from './folders';
 
-const ROOT = '_Image Graph/Thumbnails', FILE = `${ROOT}/sizes.json`, BATCH = 250;
+const FILE = `${THUMBNAILS_ROOT}/sizes.json`, BATCH = 250;
 /** width, height, mtime, byte size. A width of 0 records a format the header reader cannot read. */
 type Entry = [number, number, number, number];
 
@@ -137,7 +138,7 @@ export class SizeIndex {
   const text = JSON.stringify({version: 1, sizes: Object.fromEntries(this.known)});
   this.write = this.write.then(async () => {
    if (this.disposed) return;
-   for (const path of ['_Image Graph', ROOT]) if (!this.app.vault.getAbstractFileByPath(path)) await this.app.vault.createFolder(path);
+   await ensureFolder(this.app, THUMBNAILS_ROOT);
    const file = this.app.vault.getAbstractFileByPath(FILE);
    if (file instanceof TFile) await this.app.vault.modify(file, text); else await this.app.vault.create(FILE, text);
   }).catch((error: unknown) => console.warn('Image Graph image sizes:', error));

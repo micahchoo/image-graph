@@ -7,7 +7,8 @@ import {OverviewAtlas} from './overview';
 import {SizeIndex} from './sizes';
 import {Jobs} from './jobs';
 import {renderEmbed, type EmbedHost} from './embed';
-import {NOTES_ROOT, OLD_NOTES_ROOT, annotationLinks, attachmentLink} from './links';
+import {EXTRACTED_ROOT, NOTES_ROOT, OLD_NOTES_ROOT, annotationLinks, attachmentLink} from './links';
+import {DATA_ROOT, EXPORTS_ROOT, THUMBNAILS_ROOT, ensureFolder} from './folders';
 import {ANNOTATION_INDEX, annotationId, annotationPlugin, readAnnotationIndex} from './annotations';
 import {FuzzySuggestModal, type App} from 'obsidian';
 
@@ -118,10 +119,10 @@ export default class ImageGraphPlugin extends Plugin implements GraphHost {
  }
  onunload(){void this.store?.flush().catch(error=>console.error('Image Graph save:',error));}
  private scheduleRefresh(file:TAbstractFile){
-  if(file.path.startsWith('_Image Graph/Thumbnails/'))return;
-  if(file.path.startsWith('_Image Graph/Data/'))this.reloadData=true;
+  if(file.path.startsWith(`${THUMBNAILS_ROOT}/`))return;
+  if(file.path.startsWith(`${DATA_ROOT}/`))this.reloadData=true;
   else if(file.path===ANNOTATION_INDEX)this.reloadAnnotations=true;
-  else if(isImage(file.path)&&!file.path.startsWith('_Image Graph/Exports/'))this.refreshImages=true;
+  else if(isImage(file.path)&&!file.path.startsWith(`${EXPORTS_ROOT}/`))this.refreshImages=true;
   else if(file.path.startsWith(`${NOTES_ROOT}/`)||file.path.startsWith(`${OLD_NOTES_ROOT}/`)){this.changed();return;}
   else return;
   this.window.clearTimeout(this.refreshTimer);this.refreshTimer=this.window.setTimeout(()=>this.run(async()=>{await this.store.flush();const reload=this.reloadData,refresh=this.refreshImages,annotations=this.reloadAnnotations;this.reloadData=false;this.refreshImages=false;this.reloadAnnotations=false;if(reload)await this.store.load();else if(refresh)await this.store.refreshCatalog();if(reload||refresh)this.sizes?.republish();
@@ -227,7 +228,7 @@ export default class ImageGraphPlugin extends Plugin implements GraphHost {
   if(region.shape.type==='polygon'){ctx.beginPath();region.shape.points.forEach((p,i)=>{const px=(p.x*img.naturalWidth-crop.sourceX)*crop.scale,py=(p.y*img.naturalHeight-crop.sourceY)*crop.scale;if(i)ctx.lineTo(px,py);else ctx.moveTo(px,py);});ctx.closePath();ctx.clip();}
   ctx.drawImage(img,crop.sourceX,crop.sourceY,crop.sourceWidth,crop.sourceHeight,0,0,crop.width,crop.height);
   const blob=await new Promise<Blob>((resolve,reject)=>canvas.toBlob(value=>value?resolve(value):reject(new Error('Image encoding failed.')),'image/png'));
-  const folder='_Image Graph/Extracted';for(const path of ['_Image Graph',folder])if(!this.app.vault.getAbstractFileByPath(path))await this.app.vault.createFolder(path);
+  await ensureFolder(this.app,EXTRACTED_ROOT);
   const path=normalizePath(extractionPath(region.label,image.path,candidate=>!!this.app.vault.getAbstractFileByPath(candidate)));await this.app.vault.createBinary(path,await blob.arrayBuffer());await this.store.refreshCatalog();
   const extracted=this.getSnapshot().images.find(i=>i.path===path);if(!extracted)throw new Error('The extracted image was not added to the catalog.');
   const dimensions=exploreSize({width:crop.sourceWidth,height:crop.sourceHeight},240);
@@ -252,7 +253,7 @@ export default class ImageGraphPlugin extends Plugin implements GraphHost {
  private async backfillExtractionEdges(){
   const snapshot=this.getSnapshot(),regions=new Map(snapshot.regions.map(region=>[region.id,region]));
   for(const extracted of snapshot.images){
-   if(!extracted.path.startsWith('_Image Graph/Extracted/')||!extracted.metadataPath)continue;
+   if(!extracted.path.startsWith(`${EXTRACTED_ROOT}/`)||!extracted.metadataPath)continue;
    const companion=this.app.vault.getAbstractFileByPath(extracted.metadataPath);if(!(companion instanceof TFile))continue;
    let frontmatter:unknown;try{const text=await this.app.vault.read(companion),match=text.match(/^---\s*\n([\s\S]*?)\n---(?:\s*\n|$)/);frontmatter=match?parseYaml(match[1]):undefined;}catch{continue;}
    if(!frontmatter||typeof frontmatter!=='object'||(frontmatter as Record<string,unknown>).image_graph_id!==extracted.id)continue;

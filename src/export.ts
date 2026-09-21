@@ -3,6 +3,7 @@ import type {App} from 'obsidian';
 import type {EdgeRecord, GraphSnapshot, ImageRecord, Rect, ViewFrame} from './types';
 import {detached} from './dom';
 import {onScreen} from './geometry';
+import {EXPORTS_ROOT, ensureFolder} from './folders';
 import {DEFAULT_PALETTE, renderScene, themePalette} from './render';
 import {imageCaptions} from './presentation';
 
@@ -19,10 +20,7 @@ export class GraphExporter {
   while (vault.getAbstractFileByPath(candidate)) candidate = `${stem}-${i++}${ext}`;
   return candidate;
  }
- private async ensureFolder(): Promise<void> {
-  if (!this.app.vault.getAbstractFileByPath('_Image Graph')) await this.app.vault.createFolder('_Image Graph');
-  if (!this.app.vault.getAbstractFileByPath('_Image Graph/Exports')) await this.app.vault.createFolder('_Image Graph/Exports');
- }
+
  private validateFrame(frame: ViewFrame): void {
   if (!Number.isFinite(frame.width) || !Number.isFinite(frame.height) || frame.width <= 0 || frame.height <= 0) throw new Error('Export frame must have positive dimensions');
   if (!Number.isFinite(frame.camera.x) || !Number.isFinite(frame.camera.y) || !Number.isFinite(frame.camera.scale) || frame.camera.scale <= 0) throw new Error('Export frame camera is invalid');
@@ -38,14 +36,14 @@ export class GraphExporter {
  }
  async canvas(snapshot: GraphSnapshot, frame: ViewFrame): Promise<TFile> {
   this.validateFrame(frame);
-  await this.ensureFolder();
+  await ensureFolder(this.app, EXPORTS_ROOT);
   const {images, positions, edges} = this.selected(snapshot, frame); const ids = new Map(images.map((image) => [image.id, `image-${image.id}`]));
   const nodes: CanvasNode[] = images.map((image) => { const p = positions.get(image.id)!; return {id: ids.get(image.id)!, type:'file', file:image.path, x:Math.round(p.x), y:Math.round(p.y), width:Math.round(p.width), height:Math.round(p.height)}; });
   const canvasEdges: CanvasEdge[] = edges.map((edge) => {
    const direction = edge.direction; const label = typeof edge.properties?.relation === 'string' ? edge.properties.relation : undefined;
    return {id:`edge-${edge.id}`, fromNode:ids.get(edge.source.imageId)!, toNode:ids.get(edge.target.imageId)!, fromEnd:direction === 'reverse' || direction === 'both' ? 'arrow' : 'none', toEnd:direction === 'forward' || direction === 'both' ? 'arrow' : 'none', label};
   });
-  const path = await this.uniquePath('_Image Graph/Exports/image-graph.canvas');
+  const path = await this.uniquePath(`${EXPORTS_ROOT}/image-graph.canvas`);
   return this.app.vault.create(path, JSON.stringify({nodes, edges:canvasEdges}, null, 2));
  }
 
@@ -70,7 +68,7 @@ export class GraphExporter {
    context.drawImage(source,0,0,copy.width,copy.height);
    return this.saveVisual(copy,frame);
   }
-  await this.ensureFolder(); const selected = this.selected(snapshot, frame); const doc = this.app.workspace.containerEl?.ownerDocument ?? (typeof document !== 'undefined' ? document : undefined);
+  await ensureFolder(this.app, EXPORTS_ROOT); const selected = this.selected(snapshot, frame); const doc = this.app.workspace.containerEl?.ownerDocument ?? (typeof document !== 'undefined' ? document : undefined);
   if (!doc) throw new Error('Visual export requires a document');
   const outputScale = Math.min(1, 4096 / Math.max(frame.width, frame.height), Math.sqrt(16_000_000 / Math.max(1, frame.width * frame.height)));
   const canvas = detached(doc,'canvas'); canvas.width = Math.max(1, Math.floor(frame.width * outputScale)); canvas.height = Math.max(1, Math.floor(frame.height * outputScale)); const context = canvas.getContext('2d'); if (!context) { canvas.remove(); throw new Error('Canvas is unavailable'); }
@@ -104,8 +102,8 @@ export class GraphExporter {
   let blob: Blob;
   try { blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error('PNG encoding failed')), 'image/png')); }
   finally { canvas.remove(); }
-  await this.ensureFolder();
-  const pngPath = await this.uniquePath('_Image Graph/Exports/image-graph.png'); const png = await blob.arrayBuffer(); await this.app.vault.createBinary(pngPath, png);
-  const canvasPath = await this.uniquePath('_Image Graph/Exports/image-graph-visual.canvas'); return this.app.vault.create(canvasPath, JSON.stringify({nodes:[{id:'visual-export',type:'file',file:pngPath,x:0,y:0,width:frame.width,height:frame.height}],edges:[]}, null, 2));
+  await ensureFolder(this.app, EXPORTS_ROOT);
+  const pngPath = await this.uniquePath(`${EXPORTS_ROOT}/image-graph.png`); const png = await blob.arrayBuffer(); await this.app.vault.createBinary(pngPath, png);
+  const canvasPath = await this.uniquePath(`${EXPORTS_ROOT}/image-graph-visual.canvas`); return this.app.vault.create(canvasPath, JSON.stringify({nodes:[{id:'visual-export',type:'file',file:pngPath,x:0,y:0,width:frame.width,height:frame.height}],edges:[]}, null, 2));
  }
 }

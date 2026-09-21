@@ -17,7 +17,7 @@ const edge = (id: string, source: string, target: string): EdgeRecord =>
 
 const PALETTE: Palette = {
  bg: '#bg', card: '#card', fg: '#fg', accent: '#accent',
- picked: '#picked', region: '#region', regionHover: '#hover', missing: '#missing', font: 'sans-serif', font: 'sans-serif',
+ picked: '#picked', region: '#region', regionHover: '#hover', missing: '#missing', font: 'sans-serif',
 };
 
 /** No canvas in the runner, so the renderer is judged on the calls it makes. */

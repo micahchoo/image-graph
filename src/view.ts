@@ -10,7 +10,7 @@ export const VIEW_TYPE='image-graph-view';
 type Hit={endpoint:Endpoint}|{edge:EdgeRecord};
 type Mode='select'|'rect'|'polygon'|'connect'|'move';
 interface Exploration {root:string;depth:number;filter:string;expanded:Set<string>;pinned:Set<string>;graph:Neighborhood;positions:Map<string,Rect>;savedCamera:Camera}
-interface TileLayer {canvas:HTMLCanvasElement;camera:Camera;width:number;height:number;ratio:number;positions:Map<string,Rect>;version:number}
+interface TileLayer {canvas:HTMLCanvasElement;doc:Document;camera:Camera;width:number;height:number;ratio:number;positions:Map<string,Rect>;version:number;card:string;bg:string}
 interface Drag {pointer:number;kind:'waiting'|'pan'|'image'|'region'|'ignore';start:Point;last:Point;screen:Point;origin:Camera;hit:Hit|null;imageId?:string;rect?:Rect;forcePan:boolean;forceMove:boolean}
 const clamp=(v:number,min:number,max:number)=>Math.max(min,Math.min(max,v));
 const copy=(r:Rect):Rect=>({x:r.x,y:r.y,width:r.width,height:r.height});
@@ -104,9 +104,11 @@ export class ImageGraphView extends ItemView {
   this.registerDomEvent(this.canvas,'keydown',event=>this.keydown(event));this.registerDomEvent(this.canvas,'keyup',event=>{if(event.code==='Space')this.space=false;});
   this.registerDomEvent(this.win,'blur',()=>this.cancel());
   this.observer=new ResizeObserver(()=>{const ratio=this.win.devicePixelRatio||1;this.canvas.width=Math.max(1,Math.round(this.canvas.clientWidth*ratio));this.canvas.height=Math.max(1,Math.round(this.canvas.clientHeight*ratio));if(!this.initialized&&this.images.size){this.initialized=true;this.fit();}this.schedule();});this.observer.observe(stage);
+  // A theme change alters every colour the canvas reads, and nothing else redraws it.
+  this.registerEvent(this.app.workspace.on('css-change',()=>{this.layerVersion++;this.schedule();}));
   this.unsubscribe=this.host.subscribe(()=>this.refresh());this.refresh();
  }
- async onClose():Promise<void>{this.active=false;this.metadataTicket++;this.clearLongPress();this.win.clearTimeout(this.zoomTimer);for(const builder of this.propertyBuilders)builder.dispose();this.propertyBuilders=[];this.unsubscribe?.();this.unsubscribe=null;this.observer?.disconnect();this.observer=null;this.win.cancelAnimationFrame(this.raf);this.raf=0;this.pointers.clear();this.layer=null;}
+ async onClose():Promise<void>{this.active=false;this.metadataTicket++;this.clearLongPress();this.win.clearTimeout(this.zoomTimer);for(const builder of this.propertyBuilders)builder.dispose();this.propertyBuilders=[];this.unsubscribe?.();this.unsubscribe=null;this.observer?.disconnect();this.observer=null;this.win.cancelAnimationFrame(this.raf);this.raf=0;this.pointers.clear();this.releaseLayer();}
  private refresh(){
   if(!this.active)return;this.snapshot=this.host.getSnapshot();this.images=new Map(this.snapshot.images.map(i=>[i.id,i]));this.regions=new Map(this.snapshot.regions.map(r=>[r.id,r]));this.regionsByImage.clear();
   for(const r of this.snapshot.regions){const list=this.regionsByImage.get(r.imageId)??[];list.push(r);this.regionsByImage.set(r.imageId,list);}
@@ -176,12 +178,13 @@ export class ImageGraphView extends ItemView {
   * and a margin. Reused until the scale, the data, or the camera leaves that margin. Selection
   * rings and labels stay outside it so a click never rebuilds it. */
  private tileLayer(w:number,h:number,ratio:number,card:string,bg:string):TileLayer|null{
-  const margin=Math.round(Math.min(w,h)*.25*ratio)/ratio,width=w+margin*2,height=h+margin*2,current=this.layer;
-  if(current&&current.ratio===ratio&&current.width===width&&current.height===height&&current.camera.scale===this.camera.scale&&current.positions===this.positions&&current.version===this.layerVersion){
+  const margin=Math.round(Math.min(w,h)*.25*ratio)/ratio,width=w+margin*2,height=h+margin*2,doc=this.contentEl.ownerDocument;
+  const current=this.layer?.doc===doc?this.layer:this.releaseLayer();
+  if(current&&current.ratio===ratio&&current.width===width&&current.height===height&&current.camera.scale===this.camera.scale&&current.positions===this.positions&&current.version===this.layerVersion&&current.card===card&&current.bg===bg){
    const dx=this.camera.x-current.camera.x,dy=this.camera.y-current.camera.y;
    if(dx<=0&&dy<=0&&dx+width>=w&&dy+height>=h)return current;
   }
-  const canvas=current?.canvas??detached(this.contentEl.ownerDocument,'canvas');
+  const canvas=current?.canvas??detached(doc,'canvas');
   canvas.width=Math.max(1,Math.round(width*ratio));canvas.height=Math.max(1,Math.round(height*ratio));
   const ctx=canvas.getContext('2d');if(!ctx)return null;
   const camera:Camera={scale:this.camera.scale,x:this.camera.x+margin,y:this.camera.y+margin};
@@ -192,9 +195,11 @@ export class ImageGraphView extends ItemView {
    const tile=this.host.overviewThumbnail(image,this.redraw);
    if(tile)ctx.drawImage(tile.source,tile.x,tile.y,tile.width,tile.height,r.x,r.y,r.width,r.height);
   }
-  this.layer={canvas,camera,width,height,ratio,positions:this.positions,version:this.layerVersion};
+  this.layer={canvas,doc,camera,width,height,ratio,positions:this.positions,version:this.layerVersion,card,bg};
   return this.layer;
  }
+ /** Drop the cached bitmap and its backing store. Returns null so a caller can rebuild. */
+ private releaseLayer():null{const canvas=this.layer?.canvas;if(canvas){canvas.width=0;canvas.height=0;}this.layer=null;return null;}
  private shape(ctx:CanvasRenderingContext2D,r:Rect,shape:RegionShape){ctx.beginPath();if(shape.type==='rect')ctx.rect(r.x+shape.x*r.width,r.y+shape.y*r.height,shape.width*r.width,shape.height*r.height);else{shape.points.forEach((p,i)=>{if(i)ctx.lineTo(r.x+p.x*r.width,r.y+p.y*r.height);else ctx.moveTo(r.x+p.x*r.width,r.y+p.y*r.height);});if(shape.points.length>2)ctx.closePath();}}
  private visible(r:Rect,w:number,h:number,camera:Camera=this.camera){const x=r.x*camera.scale+camera.x,y=r.y*camera.scale+camera.y;return x<=w&&y<=h&&x+r.width*camera.scale>=0&&y+r.height*camera.scale>=0;}
  /** A connection's endpoints sit inside its two image rectangles, so their union bounds the line.

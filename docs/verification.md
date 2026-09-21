@@ -60,7 +60,8 @@ The stylesheet is now one file. `property-builder.css` was merged into `styles.c
 Whole-vault panning went from 14.9 fps to 59.9 fps, and a connection loop that culled nothing went from 19.3 ms to 1.5 ms at 20,000 edges.
 Atlas page retention is now bounded at 96 MB instead of growing with the vault.
 Evidence, method and remaining limits: [rendering performance](PERFORMANCE.md).
-The cached tile layer was compared against the direct path pixel by pixel: maximum channel difference 4 of 255.
+The cached tile layer was compared against the direct path pixel by pixel: identical where the sub-pixel phases align, and a mean of 1 to 2 of 255 elsewhere.
+An audit of those changes found and fixed three defects: eviction releasing a page its own load still held, the layer pinning stale theme colours, and the layer outliving a popout document.
 
 ## Limits
 

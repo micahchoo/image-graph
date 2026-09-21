@@ -36,7 +36,20 @@ offset would resample the whole mosaic on every pan and soften it.
 The layer is painted with the background colour rather than cleared. Antialiased
 fills blend against what is under them, so a transparent layer produced a
 different result from the direct path; against an opaque background the two
-agree. Measured across the canvas, maximum channel difference 4 of 255, mean 0.
+agree.
+
+How closely they agree depends on sub-pixel phase. Where the layer's camera lands
+on the same phase as the frame's, the two are the same picture: maximum channel
+difference 4 of 255, mean 0, no channel differing. At an arbitrary phase the
+offscreen and onscreen rasterisers diverge slightly — mean 0.7 to 1.9 of 255,
+with isolated edge pixels reaching about 110. That is reproducible across runs
+and reads as a hair softer at 200% magnification: no shift, nothing missing.
+It applies only below the detail threshold, where an image is at most 32 pixels
+wide.
+
+Measure this from a freshly reloaded renderer. After a probe allocated 240
+large canvases, the aligned case reported a maximum difference of 110 rather
+than 4 — the renderer had degraded, not the code.
 
 **Connection culling.** `view.ts#spans` tests the union of an edge's two image
 rectangles against the viewport before computing endpoints, stroking, or
@@ -53,6 +66,41 @@ the budget, none of the 80 recent ones, each evicted page reset so it reloads.
 
 At 20,005 images the atlas holds 79 pages and nothing is evicted; the bound
 changes nothing below roughly 24,000 images.
+
+## Correctness of the cache
+
+Three defects were found by auditing the changes above against the live build,
+and fixed.
+
+**Eviction could take a page out from under its own load.** `load()` holds the
+page canvas across a yield every eight tiles, so a page loading for longer than
+the grace window became the least-recently-used candidate. Releasing it left
+`load()` drawing into a zeroed canvas, re-filling `ready`, marking the page
+complete and saving that canvas. Eviction now skips loading and queued pages.
+Reproduced with a page marked loading and a stale timestamp: it was released,
+its canvas zeroed and its ready set cleared. After the fix it survives while 24
+stale pages are released to reach the budget.
+
+**The cached layer pinned the theme colours it was built with.** Every colour is
+read from computed style per frame, so the direct path follows a theme change on
+the next redraw; the layer did not, and a redraw alone would not correct it. The
+colours are now part of the layer key, and `css-change` invalidates and
+schedules a redraw — which the view did not listen for before, so a theme switch
+left the whole canvas stale until something else redrew it.
+
+**The layer outlived its document.** A view moved to a popout window keeps a
+canvas belonging to the old one. The layer now records its document and is
+released when that changes, and `onClose` zeroes the backing store rather than
+dropping the reference. Reasoned and fixed, not exercised against a real popout.
+
+Two invariants were checked rather than assumed. `forceLayout` always returns a
+new map, so comparing map identity really does catch an exploration relayout.
+`edgeEndpoints` clips every endpoint to its own image or to a region inside it,
+so the union of the two image rectangles really does bound the line.
+
+The status count still means what it meant: every position in view has an image
+record, so counting positions and counting records agree at 6,565 of 20,005.
+The 240-pixel label margin is against a longest real label of 75 pixels.
 
 ## Measure the frame, not the draw
 

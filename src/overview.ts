@@ -59,14 +59,16 @@ export class OverviewAtlas {
  /** Retained pages are bounded like the detail cache, because a mosaic of the whole vault
   * would otherwise grow a megabyte for every 256 images and never give any of it back.
   * A page the frame being drawn has just asked for is never dropped, so a full-vault redraw
-  * cannot evict its own tiles; a dropped page reloads from its saved PNG, not from originals. */
+  * cannot evict its own tiles; a dropped page reloads from its saved PNG, not from originals.
+  * A loading page is never dropped either: load() holds the canvas across its yields, and
+  * would go on drawing into a released one and then save it. */
  private evict(){
   const resident=this.pages.filter(page=>page.canvas);let bytes=resident.length*PAGE_BYTES;
   if(bytes<=BUDGET)return;
   const cutoff=Date.now()-GRACE;
   for(const page of resident.sort((a,b)=>a.used-b.used)){
    if(bytes<=BUDGET)break;
-   if(page.used>cutoff||!page.canvas)continue;
+   if(page.used>cutoff||!page.canvas||page.loading||page.queued)continue;
    page.canvas.width=0;page.canvas.height=0;page.canvas=undefined;page.ready.clear();page.complete=false;bytes-=PAGE_BYTES;
   }
  }

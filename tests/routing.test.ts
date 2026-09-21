@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {LANE, midpointOf, routeOrthogonal, simplify} from '../src/routing';
+import {LANE, distanceToPath, midpointOf, routeOrthogonal, simplify} from '../src/routing';
 import type {Point, Rect} from '../src/types';
 
 const box=(x:number,y:number,width=100,height=100):Rect=>({x,y,width,height});
@@ -50,6 +50,33 @@ describe('orthogonal routing', () => {
   // Three segments of 10, 90 and 10: the middle one holds the half-way point.
   const path=[{x:0,y:0},{x:10,y:0},{x:100,y:0},{x:110,y:0}];
   expect(midpointOf(path)).toEqual({a:{x:10,y:0},b:{x:100,y:0}});
+ });
+
+ it('measures the pointer against the line that was drawn, not the chord', () => {
+  // The regression: a connection was selected by its straight chord while the renderer drew
+  // the route. Here the chord runs through the wall at y=50 and the route goes over the top,
+  // so the two answers disagree by the height of one image.
+  const wall=box(200,-50,100,200);
+  const ends:[Point,Point]=[{x:0,y:50},{x:500,y:50}];
+  const path=routeOrthogonal(ends[0],ends[1],[wall])!;
+  const reach=7;
+  // Half way along the route by length: wherever the router took the line, this point is on it.
+  const {a,b}=midpointOf(path),onTheLine={x:(a.x+b.x)/2,y:(a.y+b.y)/2};
+  expect(distanceToPath(onTheLine,path)).toBeLessThan(reach);          // the visible line selects
+  expect(distanceToPath(onTheLine,ends)).toBeGreaterThan(reach);       // the chord would refuse it
+  const onTheChord={x:250,y:50};
+  expect(distanceToPath(onTheChord,path)).toBeGreaterThan(reach);      // empty canvas does not select
+ });
+
+ it('takes the nearest segment of a polyline, and its ends are ends', () => {
+  const path=[{x:0,y:0},{x:100,y:0},{x:100,y:100}];
+  expect(distanceToPath({x:50,y:3},path)).toBe(3);
+  expect(distanceToPath({x:103,y:50},path)).toBe(3);
+  expect(distanceToPath({x:100,y:0},path)).toBe(0);
+  // Past the far end it is the distance to the end, not to the infinite line.
+  expect(distanceToPath({x:100,y:140},path)).toBe(40);
+  expect(distanceToPath({x:-30,y:0},path)).toBe(30);
+  expect(distanceToPath({x:0,y:0},[{x:9,y:9}])).toBe(Infinity);
  });
 
  it('answers a crowded field quickly enough for a frame', () => {

@@ -18,14 +18,37 @@ Storage module src/store.ts exports GraphStore:
 - flush(): Promise<void>
 
 Graph module src/graph.ts exports:
-- neighborhood(snapshot, rootId, depth, expanded: Set<string>, relationFilter: string, limit?: number): Neighborhood
+- neighborhood(snapshot, rootId, depth, expanded: Set<string>, limit?: number): Neighborhood — no relation filter; one relation is relationNeighborhood, and dimming is presentation.ts
 - Neighborhood has ids: string[], edges: EdgeRecord[], distances: Map<string,number>, parents: Map<string,{imageId:string;edge:EdgeRecord}>, capped: boolean
 - tracePath(rootId, targetId, neighborhood): Array<{from:string;to:string;edge:EdgeRecord}>
 - forceLayout(images: ImageRecord[], neighborhood, rootId, pinned: Set<string>, previous: Map<string,Rect>): Map<string,Rect>
 - endpointPosition(endpoint: Endpoint, images: Map<string,Rect>, regions: Map<string,RegionRecord>): Point
 - edgeEndpoints(edge, images, regions): boundary-clipped source and target points for drawing and hit detection
 - containsRegion(point: Point, shape: RegionShape): boolean (point normalized to image)
-- parseProperties(text: string): Properties (parseYaml, reject non-mapping/unsafe keys)
+- graph.ts imports nothing from obsidian. What a property may hold is properties.ts#parseProperties, and only that.
+
+Exploration module src/exploration.ts exports Exploration and EXPLORE_LIMIT:
+- Exploration.fromImages(snapshot, imageIds, savedCamera) and .fromRelation(snapshot, relation, savedCamera) return null rather than an empty view.
+- anchor is the one starting picture; two roots or a relation anchor nothing. countsHops is false for a relation.
+- setDepth clamps to 1..3 and clears expanded; expand/togglePin/pin/isRoot hold the rest. rebuild(snapshot) recomputes the graph and the layout.
+- filter dims connections and never reaches the traversal. EXPLORE_LIMIT is the one cap, and the status text reads it.
+- New exploration behaviour goes here, not in the view. The view keeps the camera, the selection and the two select elements.
+
+Geometry module src/geometry.ts exports overlaps, onScreen and boundsOf:
+- The single answer to "do these share area", "does this reach the viewport" and "what box holds these".
+- The canvas, the note embed, the PNG export and the still renderer must agree, or an export shows what the view culled.
+- view.ts#spans keeps its own union test on purpose: it runs per edge per frame and must allocate nothing.
+
+Extraction module src/extraction.ts exports findExtractionPosition, regionCrop and MAX_EXTRACT_SIDE:
+- regionCrop(shape, naturalWidth, naturalHeight, maxSide?) is the whole rule: bound a polygon by its corners, hold the crop inside the picture, refuse a region with no area, cap the longer side.
+- findExtractionPosition places the result on the 40px grid, clear of every other image.
+- extractionPath(label, parentPath, exists) names the file `<label> · <source>.png` under `_Image Graph/Extracted/`, numbering past a taken name.
+
+Annotations module src/annotations.ts exports readAnnotationIndex, annotationRegionId, annotationId, isForeignRegion and annotationPlugin:
+- readAnnotationIndex(text, imageIdByPath) turns Image Annotation's `index.json` into RegionRecords with `origin: 'image-annotation'` and `ia-` ids, plus per-region attachments and per-image sources. A region whose image is not catalogued is skipped and counted; a malformed record is skipped; a file that is not an index throws.
+- GraphStore.setForeignRegions holds them beside its own; upsertRegion and removeRegion refuse a foreign id; nothing foreign is written to a shard or the history. removeDanglingRegionEdges is the undoable way out when Image Annotation deletes a region.
+- annotationPlugin(app) finds the loaded plugin instance by duck-typing openRegion and openImage, at click time only. Absent means no menu item.
+- links.ts#annotationLinks and #attachmentLink produce the `annotations` property (reserved) and the extracted companion's `source_notes`. syncAnnotationLinks writes into companions that already exist and never creates one.
 
 Export module src/export.ts exports GraphExporter:
 - constructor(app: App)
@@ -59,7 +82,7 @@ View module src/view.ts exports VIEW_TYPE = 'image-graph-view' and ImageGraphVie
 - Hover is read once per frame inside draw(), never per pointermove, and frozen while a gesture owns the pointer. pointerDown re-reads instead.
 - A selected region draws grips above 48 screen pixels; dragging one resizes through graph.ts#resizeRegion from the shape the drag began with.
 - Properties use a typed builder with plain-language labels. Serialized metadata remains arbitrary YAML-compatible data.
-- Exploration 1/2/3 hops, selective expansion, pins, relation filter, paths. Separate temporary layout restores whole-vault positions/camera.
+- Exploration state and its transitions live in src/exploration.ts; the view holds one `Exploration | null`, restores the saved camera on exit, and syncs the depth and relation controls.
 - Export whole/current/selected images using ViewFrame. Visual export is current viewport; ordinary Canvas cannot preserve region endpoints.
 - Constructor/onOpen must not block whole vault with image loads or thousands of metadata writes.
 

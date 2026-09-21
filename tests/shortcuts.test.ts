@@ -7,6 +7,10 @@ describe('canvas shortcuts', () => {
  it('leaves every Obsidian chord alone', () => {
   for (const held of [{ctrlKey:true},{metaKey:true},{altKey:true}]) expect(press('r',held)).toBeNull();
   expect(press('z')).toBeNull();
+  // The one chord the canvas answers, because the canvas is the editor here.
+  expect(press('z',{ctrlKey:true})).toEqual({kind:'undo'});
+  expect(press('Z',{metaKey:true,shiftKey:true})).toEqual({kind:'redo'});
+  expect(press('z',{ctrlKey:true,altKey:true})).toBeNull();
   expect(press('4',{shiftKey:true})).toBeNull();
  });
 
@@ -27,10 +31,10 @@ describe('canvas shortcuts', () => {
   expect(press('2',{shiftKey:true})).toEqual({kind:'zoom',to:'selection'});
  });
 
- it('nudges one step, or five with shift', () => {
-  expect(press('ArrowLeft')).toEqual({kind:'nudge',dx:-NUDGE,dy:0});
-  expect(press('ArrowDown')).toEqual({kind:'nudge',dx:0,dy:NUDGE});
-  expect(press('ArrowRight',{shiftKey:true})).toEqual({kind:'nudge',dx:STRIDE,dy:0});
+ it('nudges one step, or five with shift, and says which the arrow was', () => {
+  expect(press('ArrowLeft')).toEqual({kind:'nudge',dx:-NUDGE,dy:0,far:false});
+  expect(press('ArrowDown')).toEqual({kind:'nudge',dx:0,dy:NUDGE,far:false});
+  expect(press('ArrowRight',{shiftKey:true})).toEqual({kind:'nudge',dx:STRIDE,dy:0,far:true});
   expect(STRIDE/NUDGE).toBe(5);
  });
 
@@ -42,7 +46,7 @@ describe('canvas shortcuts', () => {
 
  it('swallows only what Obsidian would otherwise act on', () => {
   expect(swallows({kind:'delete'})).toBe(true);
-  expect(swallows({kind:'nudge',dx:0,dy:NUDGE})).toBe(true);
+  expect(swallows({kind:'nudge',dx:0,dy:NUDGE,far:false})).toBe(true);
   expect(swallows({kind:'mode',mode:'rect'})).toBe(false);
   expect(swallows({kind:'cancel'})).toBe(false);
  });

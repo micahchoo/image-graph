@@ -16,6 +16,7 @@ Explore your image vault, mark regions, and connect images with labeled relation
 - Separate expansion of neighbors, pinned images, and path highlights.
 - Editable Canvas exports and visual snapshots.
 - Explicit image extraction from a region, with source references.
+- Regions drawn with the Image Annotation plugin, shown in the graph and opened in that plugin.
 
 ## Start
 
@@ -110,6 +111,12 @@ Editable exports reference the original image files.
 The command **Create example connections between twelve images** creates an illustrative network.
 These connections are examples, not claims inferred from image content.
 Their properties identify them as examples.
+
+## With Image Annotation
+
+If the Image Annotation plugin is installed, its regions appear on their images with a dashed outline.
+Select one to see the notes it is attached to, open it in Image Annotation, connect it, or extract it as an image.
+Edit or delete those regions in Image Annotation. The graph reads its index and never writes to it.
 
 ## Storage and compatibility
 

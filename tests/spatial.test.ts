@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {SpatialIndex} from '../src/spatial';
+import {SpatialIndex, neighbourInDirection} from '../src/spatial';
 import type {Point, Rect} from '../src/types';
 
 const meets=(r:Rect,a:Rect)=>r.x<=a.x+a.width&&r.y<=a.y+a.height&&r.x+r.width>=a.x&&r.y+r.height>=a.y;
@@ -56,5 +56,42 @@ describe('spatial index', () => {
   const first=index.query(area);
   index.query({x:300,y:300,width:60,height:60});
   expect(index.query(area)).toEqual(first);
+ });
+});
+
+describe('travelling the grid by arrow', () => {
+ // Three rows of three, 240 wide on a 280 pitch, which is the whole-vault grid.
+ const cells = new Map<string, Rect>();
+ for (let row = 0; row < 3; row++) for (let column = 0; column < 3; column++) cells.set(`r${row}c${column}`, {x: column * 280, y: row * 280, width: 240, height: 240});
+ const from = (id: string, dx: number, dy: number) => neighbourInDirection(cells.get(id)!, cells, dx, dy);
+
+ it('follows the row and the column rather than the shortest line', () => {
+  expect(from('r1c1', 1, 0)).toBe('r1c2');
+  expect(from('r1c1', -1, 0)).toBe('r1c0');
+  expect(from('r1c1', 0, 1)).toBe('r2c1');
+  expect(from('r1c1', 0, -1)).toBe('r0c1');
+ });
+
+ it('stops at the edge rather than wrapping', () => {
+  expect(from('r0c0', -1, 0)).toBeNull();
+  expect(from('r0c0', 0, -1)).toBeNull();
+  expect(from('r2c2', 1, 0)).toBeNull();
+ });
+
+ it('steps to the next row when its own row has run out', () => {
+  // Nothing is to the right of r0c2 on its row, but the row below is still that way down.
+  expect(from('r0c2', 1, 0)).toBeNull();
+  expect(from('r0c2', 0, 1)).toBe('r1c2');
+ });
+
+ it('takes the nearer of two, and answers the same way every time', () => {
+  const sparse = new Map<string, Rect>([
+   ['here', {x: 0, y: 0, width: 100, height: 100}],
+   ['near', {x: 400, y: 40, width: 100, height: 100}],
+   ['far', {x: 900, y: 0, width: 100, height: 100}],
+  ]);
+  expect(neighbourInDirection(sparse.get('here')!, sparse, 1, 0)).toBe('near');
+  expect(neighbourInDirection(sparse.get('here')!, sparse, 1, 0)).toBe('near');
+  expect(neighbourInDirection(sparse.get('here')!, sparse, 0, 1)).toBeNull();
  });
 });

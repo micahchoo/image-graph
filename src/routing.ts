@@ -128,3 +128,17 @@ export function midpointOf(path:readonly Point[]):{a:Point;b:Point}{
  }
  return{a:path[0],b:path[path.length-1]};
 }
+
+const toSegment=(p:Point,a:Point,b:Point)=>{
+ const dx=b.x-a.x,dy=b.y-a.y,t=Math.max(0,Math.min(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/(dx*dx+dy*dy||1)));
+ return Math.hypot(p.x-a.x-t*dx,p.y-a.y-t*dy);
+};
+
+/** How far a point lies from a polyline. Hit testing a connection must measure the line the
+ * renderer drew: a routed path leaves its own chord by a whole image, so a chord measurement
+ * answers for empty canvas beside the line and refuses the line itself. */
+export function distanceToPath(p:Point,path:readonly Point[]):number{
+ let best=Infinity;
+ for(let i=1;i<path.length;i++)best=Math.min(best,toSegment(p,path[i-1],path[i]));
+ return best;
+}

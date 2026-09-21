@@ -55,6 +55,32 @@ describe('OverviewAtlas',()=>{
   const vault=new Vault(),a=image('a');vault.files.set(a.path,new FakeTFile(a.path) as File);const {app,doc}=environment(vault),atlas=new OverviewAtlas(app,doc);atlas.sync([a]);atlas.get(a,()=>{});await new Promise(r=>setTimeout(r,130));const before=atlas.get(a,()=>{});expect(before).not.toBeNull();const reads=vault.originalReads;
   atlas.sync([{...a,x:999,y:333}]);const after=atlas.get(a,()=>{});expect(after?.source).toBe(before?.source);expect(vault.originalReads).toBe(reads);atlas.dispose();
  });
+ it('keeps every other slot when one image leaves',async()=>{
+  // A slot is an address. Closing the gap renumbered every later image, so every page
+  // signature changed and the whole vault was decoded again for one departure.
+  const vault=new Vault(),all=['a','b','c','d'].map(image);
+  for(const im of all)vault.files.set(im.path,new FakeTFile(im.path) as File);
+  const {app,doc}=environment(vault),atlas=new OverviewAtlas(app,doc);
+  atlas.sync(all);for(const im of all)atlas.get(im,()=>{});
+  await new Promise(r=>setTimeout(r,160));
+  const before=all.map(im=>atlas.get(im,()=>{})),reads=vault.originalReads;
+  expect(before.every(crop=>crop!==null)).toBe(true);
+  // 'b' goes. Everything else keeps its tile, and nothing is read again.
+  const survivors=[all[0],all[2],all[3]];
+  atlas.sync(survivors);
+  for(const im of survivors)expect(atlas.get(im,()=>{})).toEqual(before[all.indexOf(im)]);
+  await new Promise(r=>setTimeout(r,160));
+  expect(vault.originalReads).toBe(reads);
+  // A new image takes the empty slot rather than the end.
+  const e=image('e');vault.files.set(e.path,new FakeTFile(e.path) as File);
+  atlas.sync([...survivors,e]);
+  atlas.get(e,()=>{});
+  await new Promise(r=>setTimeout(r,160));
+  expect(atlas.get(e,()=>{})).toMatchObject({x:before[1]!.x,y:before[1]!.y});
+  expect(vault.originalReads).toBe(reads+1);
+  for(const im of survivors)expect(atlas.get(im,()=>{})).toEqual(before[all.indexOf(im)]);
+  atlas.dispose();
+ });
  it('copies the existing prefix when an image is appended',async()=>{
   const vault=new Vault(),a=image('a'),b=image('b');for(const im of [a,b])vault.files.set(im.path,new FakeTFile(im.path) as File);const {app,doc}=environment(vault),atlas=new OverviewAtlas(app,doc);atlas.sync([a]);atlas.get(a,()=>{});await new Promise(r=>setTimeout(r,130));const before=atlas.get(a,()=>{})!,reads=vault.originalReads;
   atlas.sync([a,b]);expect(atlas.get(a,()=>{})?.source).toBe(before.source);atlas.get(b,()=>{});await new Promise(r=>setTimeout(r,130));expect(vault.originalReads).toBe(reads+1);expect(atlas.get(a,()=>{})?.source).toBe(before.source);atlas.dispose();

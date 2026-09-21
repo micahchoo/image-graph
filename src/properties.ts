@@ -1,7 +1,11 @@
 import type {Properties, PropertyValue} from './types';
 
+/** The property a companion note carries its connections in. `links.ts` writes the value. */
+export const LINKS_KEY = 'connections';
 /** Keys the plugin writes into a companion note itself. An owner's property cannot use them. */
-export const RESERVED_KEYS = ['image', 'image_graph_id'] as const;
+/** The property a companion note carries Image Annotation's attachments in. `links.ts` writes the value. */
+export const ANNOTATIONS_KEY = 'annotations';
+export const RESERVED_KEYS = ['image', 'image_graph_id', LINKS_KEY, ANNOTATIONS_KEY] as const;
 /** Keys that would reach Object.prototype through a plain assignment. */
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 

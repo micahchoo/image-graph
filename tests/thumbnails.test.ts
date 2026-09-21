@@ -26,6 +26,15 @@ describe('adaptive image detail',()=>{
   const small=cache.get(im,ready,100);expect(cache.get(im,ready,1800)).toBe(small);release();
   await vi.waitFor(()=>expect((cache.get(im,ready,1800) as HTMLCanvasElement).width).toBe(2048));cache.dispose();
  });
+ it('gives a wide picture a wide texture rather than a squashed square',async()=>{
+  const{cache,decode}=setup(),wide={...image('w'),width:960,height:240},ready=vi.fn();
+  cache.get(wide,ready,900);
+  await vi.waitFor(()=>expect(ready).toHaveBeenCalledOnce());
+  const texture=cache.get(wide,ready,900) as HTMLCanvasElement;
+  expect(texture.width).toBe(1024);expect(texture.height).toBe(256);
+  expect(decode).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({resizeWidth:1024,resizeHeight:256}));
+  cache.dispose();
+ });
  it('bounds memory and concurrent decoding for large images',()=>{
   const{cache}=setup();for(let n=0;n<30;n++)cache.get(image(String(n)),()=>{},2000);
   expect(cache.stats.bytes).toBeLessThanOrEqual(96*1024*1024);expect(cache.stats.decoding).toBeLessThanOrEqual(2);cache.dispose();

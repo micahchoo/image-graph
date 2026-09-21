@@ -1,8 +1,10 @@
 import {TFile} from 'obsidian';
 import type {App} from 'obsidian';
 import type {EdgeRecord, GraphSnapshot, ImageRecord, Rect, ViewFrame} from './types';
-import {edgeEndpoints} from './graph';
 import {detached} from './dom';
+import {onScreen} from './geometry';
+import {DEFAULT_PALETTE, renderScene, themePalette} from './render';
+import {imageCaptions} from './presentation';
 
 type CanvasNode = {id:string; type:'file'|'text'; x:number; y:number; width:number; height:number; file?:string; text?:string};
 type CanvasEdge = {id:string; fromNode:string; toNode:string; fromSide?:string; toSide?:string; fromEnd:'none'|'arrow'; toEnd:'none'|'arrow'; label?:string};
@@ -54,9 +56,10 @@ export class GraphExporter {
   const element = detached(doc,'img'); element.decoding = 'async'; element.src = this.app.vault.getResourcePath(file);
   try { await element.decode(); return element; } catch { element.remove(); return null; }
  }
+ /** Worth loading an original for: on screen, and at least a pixel of it. */
  private visible(rect: Rect, frame: ViewFrame): boolean {
-  const scale = frame.camera.scale; const left = (-frame.camera.x) / scale; const top = (-frame.camera.y) / scale; const right = left + frame.width / scale; const bottom = top + frame.height / scale;
-  return rect.x + rect.width >= left && rect.y + rect.height >= top && rect.x <= right && rect.y <= bottom && rect.width * scale >= 1 && rect.height * scale >= 1;
+  const scale = frame.camera.scale;
+  return onScreen(rect, frame.camera, frame.width, frame.height) && rect.width * scale >= 1 && rect.height * scale >= 1;
  }
  async visual(snapshot: GraphSnapshot, frame: ViewFrame, source?:HTMLCanvasElement): Promise<TFile> {
   this.validateFrame(frame);
@@ -72,29 +75,29 @@ export class GraphExporter {
   const outputScale = Math.min(1, 4096 / Math.max(frame.width, frame.height), Math.sqrt(16_000_000 / Math.max(1, frame.width * frame.height)));
   const canvas = detached(doc,'canvas'); canvas.width = Math.max(1, Math.floor(frame.width * outputScale)); canvas.height = Math.max(1, Math.floor(frame.height * outputScale)); const context = canvas.getContext('2d'); if (!context) { canvas.remove(); throw new Error('Canvas is unavailable'); }
   context.scale(outputScale, outputScale);
-  context.fillStyle = '#111'; context.fillRect(0, 0, frame.width, frame.height);
-  const images = selected.images.filter((image) => this.visible(selected.positions.get(image.id)!, frame));
-  for (let start = 0; start < images.length; start += 4) {
-   const batch = await Promise.all(images.slice(start, start + 4).map(async (image) => {
-    const rect = selected.positions.get(image.id)!;
-    return [image, rect.width * frame.camera.scale >= 32 && rect.height * frame.camera.scale >= 32 ? await this.loadImage(image) : null] as const;
-   }));
-   for (const [image, loaded] of batch) { const p = selected.positions.get(image.id)!; const x = p.x * frame.camera.scale + frame.camera.x; const y = p.y * frame.camera.scale + frame.camera.y; if (loaded && p.width * frame.camera.scale >= 32 && p.height * frame.camera.scale >= 32) context.drawImage(loaded, x, y, p.width * frame.camera.scale, p.height * frame.camera.scale); else { context.fillStyle = '#333'; context.fillRect(x, y, p.width * frame.camera.scale, p.height * frame.camera.scale); } loaded?.remove(); }
+  /* Every picture is loaded before anything is drawn, because `renderScene` never loads: it
+   * is handed whatever the caller already holds, which is a thumbnail in the view and a note,
+   * and the original here. Four at a time, as before. */
+  const loaded = new Map<string, HTMLImageElement>();
+  const wanted = selected.images.filter((image) => { const rect = selected.positions.get(image.id); return !!rect && rect.width * frame.camera.scale >= 32 && rect.height * frame.camera.scale >= 32 && this.visible(rect, frame); });
+  for (let start = 0; start < wanted.length; start += 4) {
+   const batch = await Promise.all(wanted.slice(start, start + 4).map(async (image) => [image.id, await this.loadImage(image)] as const));
+   for (const [id, element] of batch) if (element) loaded.set(id, element);
   }
-  const regions = new Map(snapshot.regions.map((region) => [region.id, region])); const pos = selected.positions;
-  context.strokeStyle = '#f2c94c'; context.lineWidth = 2;
-  for (const region of snapshot.regions.filter((r) => frame.imageIds.includes(r.imageId))) {
-   const p = pos.get(region.imageId); if (!p) continue; context.beginPath(); if (region.shape.type === 'rect') context.rect((p.x + region.shape.x * p.width) * frame.camera.scale + frame.camera.x, (p.y + region.shape.y * p.height) * frame.camera.scale + frame.camera.y, region.shape.width * p.width * frame.camera.scale, region.shape.height * p.height * frame.camera.scale); else region.shape.points.forEach((point, i) => { const x = (p.x + point.x * p.width) * frame.camera.scale + frame.camera.x; const y = (p.y + point.y * p.height) * frame.camera.scale + frame.camera.y; i ? context.lineTo(x, y) : context.moveTo(x, y); }); context.closePath(); context.stroke();
-  }
-  context.strokeStyle = '#fff'; context.lineWidth = 1.5;
-  for (const edge of selected.edges) {
-   const {source:a,target:b} = edgeEndpoints(edge,pos,regions); const ax = a.x * frame.camera.scale + frame.camera.x; const ay = a.y * frame.camera.scale + frame.camera.y; const bx = b.x * frame.camera.scale + frame.camera.x; const by = b.y * frame.camera.scale + frame.camera.y;
-   context.beginPath(); context.moveTo(ax, ay); context.lineTo(bx, by); context.stroke();
-   const label = typeof edge.properties?.relation === 'string' ? edge.properties.relation : '';
-   if (label) { context.fillStyle = '#fff'; context.font = '12px sans-serif'; context.fillText(label, (ax + bx) / 2 + 4, (ay + by) / 2 - 4); }
-   const drawArrow = (x: number, y: number, angle: number): void => { const size = 8; context.beginPath(); context.moveTo(x, y); context.lineTo(x - Math.cos(angle - .45) * size, y - Math.sin(angle - .45) * size); context.lineTo(x - Math.cos(angle + .45) * size, y - Math.sin(angle + .45) * size); context.closePath(); context.fillStyle = '#fff'; context.fill(); };
-   const angle = Math.atan2(by - ay, bx - ax); if (edge.direction === 'forward' || edge.direction === 'both') drawArrow(bx, by, angle); if (edge.direction === 'reverse' || edge.direction === 'both') drawArrow(ax, ay, angle + Math.PI);
-  }
+  try {
+   const view = this.app.workspace.containerEl;
+   renderScene(context, {
+    images: selected.images,
+    positions: selected.positions,
+    edges: selected.edges,
+    regions: snapshot.regions.filter((region) => frame.imageIds.includes(region.imageId)),
+    captions: imageCaptions(selected.images, snapshot.regions, snapshot.edges),
+   }, {
+    camera: frame.camera, width: frame.width, height: frame.height,
+    palette: view ? themePalette(getComputedStyle(view)) : DEFAULT_PALETTE,
+    thumbnail: (image) => loaded.get(image.id) ?? null,
+   });
+  } finally { for (const element of loaded.values()) element.remove(); }
   return this.saveVisual(canvas,frame);
  }
  private async saveVisual(canvas:HTMLCanvasElement,frame:ViewFrame):Promise<TFile>{

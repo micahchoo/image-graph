@@ -1,3 +1,22 @@
+# Unreleased
+
+Regions from the Image Annotation plugin.
+
+- Regions drawn in Image Annotation appear on their images with a dashed outline. The graph reads that plugin's index and never writes to it.
+- Select one to see the notes it is attached to. Open it in Image Annotation, or open that plugin's editor on any image, while it is loaded.
+- Connections can reach a foreign region. **Remove connections to deleted Image Annotation regions** clears the ones whose region is gone, and undo restores them.
+- Extracted images are named after their region and source, `Dark water · Harbour at dusk.png`, instead of an id.
+- An extracted image's companion links to the notes its Image Annotation region was attached to. Companion notes that already exist carry an `annotations` property with the same links.
+- A web image Image Annotation saved gets a companion named after the note it was clipped from, with `source_url` and `source_note`.
+
+Snapshots and note embeds draw what the workspace draws.
+
+- Labels and captions in exports and embeds used a font string the canvas cannot parse, so they were drawn at 10px in the default face. They now use the interface font at the intended size.
+- Connections in a snapshot go around the images between their ends, as they do in the workspace, instead of cutting through them.
+- A missing image is painted in the error colour in a snapshot, as in the workspace, instead of looking like an ordinary card.
+- Regions from Image Annotation are dashed in a snapshot, as in the workspace.
+- A recording canvas in the tests holds the still renderer to what the workspace draws.
+
 # 0.2.1
 
 A clearer exploration graph.

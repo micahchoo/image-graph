@@ -1,32 +1,57 @@
-import {ItemView, Menu, Modal, Notice, WorkspaceLeaf} from 'obsidian';
+import {FuzzySuggestModal, ItemView, Menu, Modal, Notice, WorkspaceLeaf, setIcon} from 'obsidian';
+import type {App} from 'obsidian';
 import type {Camera, Direction, EdgeRecord, Endpoint, GraphHost, GraphSnapshot, ImageRecord, Point, Properties, Rect, RegionRecord, RegionShape, ViewFrame} from './types';
 import {newId} from './types';
-import {containsRegion, edgeEndpoints, forceLayout, neighborhood, parseRegionShape, regionHandles, relationOf, resizeRegion, tracePath, type HandleId, type Neighborhood} from './graph';
+import {containsRegion, edgeEndpoints, parseRegionShape, regionHandles, relationNames, relationOf, resizeRegion, tracePath, type HandleId} from './graph';
+import {isForeignRegion} from './annotations';
 import {renderPropertyBuilder} from './property-builder';
 import {RESERVED_KEYS, propertyMessage} from './properties';
+import {EXPLORE_LIMIT, Exploration} from './exploration';
 import {NOTHING, imageSelection, keepImages, prune, selectTarget, selectedImages, type Selection} from './selection';
-import {SpatialIndex} from './spatial';
+import {SpatialIndex, neighbourInDirection} from './spatial';
 import {SHORTCUTS, commandFor, swallows, type Command} from './shortcuts';
-import {LANE, midpointOf, routeOrthogonal} from './routing';
+import {noteBlock} from './blocks';
+import {LANE, distanceToPath, midpointOf, routeOrthogonal} from './routing';
 import {detailSize} from './thumbnails';
 import {detached} from './dom';
+import {boundsOf, onScreen, overlaps} from './geometry';
 import {connectionStyle, imageCaptions, shortenLabel} from './presentation';
 
 export const VIEW_TYPE='image-graph-view';
+
+/** Obsidian's own fuzzy picker, so finding an image uses the keys every other search does. */
+class ImagePicker extends FuzzySuggestModal<ImageRecord>{
+ constructor(app:App,private images:ImageRecord[],private label:(image:ImageRecord)=>string,private chosen:(image:ImageRecord)=>void){
+  super(app);this.setPlaceholder('Find an image by name or folder');
+ }
+ getItems(){return this.images;}
+ getItemText(image:ImageRecord){return this.label(image);}
+ onChooseItem(image:ImageRecord){this.chosen(image);}
+}
+
+/** The relations the vault uses, with how much each one joins, so the list is worth reading. */
+class RelationPicker extends FuzzySuggestModal<string>{
+ private counts:Map<string,number>;
+ constructor(app:App,private names:string[],snapshot:GraphSnapshot,private chosen:(name:string)=>void){
+  super(app);this.setPlaceholder('Explore every connection of one relation');
+  this.counts=new Map();
+  for(const edge of snapshot.edges){const name=relationOf(edge.properties);if(name)this.counts.set(name,(this.counts.get(name)??0)+1);}
+ }
+ getItems(){return this.names;}
+ getItemText(name:string){const count=this.counts.get(name)??0;return `${name} — ${count} connection${count===1?'':'s'}`;}
+ onChooseItem(name:string){this.chosen(name);}
+}
 type Hit={endpoint:Endpoint}|{edge:EdgeRecord};
 type Mode='select'|'rect'|'polygon'|'connect'|'move';
 /** Work the owner began and has not committed. One field, so cancelling is one assignment. */
 type Draft={kind:'polygon';imageId:string;points:Point[]}|{kind:'connect';source:Endpoint}|{kind:'region';imageId:string;start:Point;last:Point}
  |{kind:'resize';regionId:string;imageId:string;handle:HandleId;origin:RegionShape;shape:RegionShape};
-interface Exploration {root:string;depth:number;filter:string;expanded:Set<string>;pinned:Set<string>;graph:Neighborhood;positions:Map<string,Rect>;savedCamera:Camera}
 interface TileLayer {canvas:HTMLCanvasElement;doc:Document;camera:Camera;width:number;height:number;ratio:number;positions:Map<string,Rect>;version:number;card:string;bg:string}
 interface Drag {pointer:number;kind:'waiting'|'pan'|'image'|'region'|'marquee'|'handle';start:Point;screen:Point;origin:Camera;hit:Hit|null;imageId?:string;origins?:Map<string,Rect>;marquee?:{base:ReadonlySet<string>;last:Point};forcePan:boolean;forceMove:boolean}
 const clamp=(v:number,min:number,max:number)=>Math.max(min,Math.min(max,v));
 const copy=(r:Rect):Rect=>({x:r.x,y:r.y,width:r.width,height:r.height});
-const overlaps=(a:Rect,b:Rect)=>a.x<b.x+b.width&&b.x<a.x+a.width&&a.y<b.y+b.height&&b.y<a.y+a.height;
 interface LabelJob {text:string;a:Point;b:Point;alpha:number;priority:number}
 const relation=(e:EdgeRecord)=>relationOf(e.properties)??'related to';
-const distance=(p:Point,a:Point,b:Point)=>{const dx=b.x-a.x,dy=b.y-a.y,t=clamp(((p.x-a.x)*dx+(p.y-a.y)*dy)/(dx*dx+dy*dy||1),0,1);return Math.hypot(p.x-a.x-t*dx,p.y-a.y-t*dy);};
 
 export class ImageGraphView extends ItemView {
  private canvas!:HTMLCanvasElement;
@@ -38,6 +63,23 @@ export class ImageGraphView extends ItemView {
  private relationSelect!:HTMLSelectElement;
  private drawingControls!:HTMLElement;
  private finishButton!:HTMLButtonElement;
+ private undoPointButton!:HTMLButtonElement;
+ private drawingText!:HTMLElement;
+ private announcer!:HTMLElement;
+ private zoomBar!:HTMLElement;
+ private zoomLabel!:HTMLButtonElement;
+ private vaultButton!:HTMLButtonElement;
+ private exploreButton!:HTMLButtonElement;
+ private renderedWhere:boolean|null=null;
+ // Written only when they change: the status is read every frame and writing it every frame
+ // both costs a layout and, as a live region, talked over the gesture.
+ private statusText='';
+ private renderedZoom='';
+ private renderedJob='';
+ private jobChip!:HTMLElement;
+ private jobText!:HTMLElement;
+ private jobStop!:HTMLButtonElement;
+ private announced='';
  private propertyBuilders:Array<{dispose():void}>=[];
  private snapshot:GraphSnapshot={images:[],regions:[],edges:[]};
  private images=new Map<string,ImageRecord>();
@@ -52,14 +94,23 @@ export class ImageGraphView extends ItemView {
  // A route is world geometry, so it survives panning and zooming. It is cleared with the
  // index, which is exactly when a rectangle moved.
  private routes=new Map<string,Point[]|null>();
+ /** Whether the last frame routed. The hit test has to measure what was drawn, and a frame
+  * that fell back to straight lines leaves routes in the cache that it did not use. */
+ private routed=false;
  /** Above this many connections on screen, routing costs more than the tangle it removes. */
  private static readonly ROUTE_LIMIT=240;
+ /** How near the pointer must come to a connection, in screen pixels. */
+ private static readonly REACH=7;
  private camera:Camera={x:0,y:0,scale:1};
  private exploration:Exploration|null=null;
  private selection:Selection=NOTHING;
  private selectionImages:ReadonlySet<string>=selectedImages(NOTHING);
  private draft:Draft|null=null;
  private mode:Mode='select';
+ // The toolbar says which mode is on. Mode is also assigned outside setMode, so the
+ // buttons follow the field from the frame and write to the DOM only when it changes.
+ private modeButtons:Array<{button:HTMLButtonElement;mode:Mode}>=[];
+ private renderedMode:Mode|null=null;
  private drag:Drag|null=null;
  // What the pointer is over, and where it last was. A pointer can report far more moves
  // than there are frames, so the hit test runs once per frame instead of once per move.
@@ -81,6 +132,7 @@ export class ImageGraphView extends ItemView {
  private observer:ResizeObserver|null=null;
  private metadataTicket=0;
  private unsubscribe:(()=>void)|null=null;
+ private unsubscribeJobs:(()=>void)|null=null;
  private stats={visible:0,drawMs:0,frameMs:0};
  private lastDraw=0;
  private layer:TileLayer|null=null;
@@ -107,28 +159,93 @@ export class ImageGraphView extends ItemView {
  async onOpen():Promise<void>{
   this.active=true;this.contentEl.empty();this.contentEl.addClass('image-graph-view');
   const root=this.contentEl.createDiv({cls:'image-graph-root'}),bar=root.createDiv({cls:'image-graph-toolbar'});
-  const button=(text:string,action:()=>void)=>{const b=bar.createEl('button',{text});this.registerDomEvent(b,'click',action);return b;};
-  button('Whole vault',()=>{if(this.exploration)this.exitExploration();else this.fit();});
-  button('Explore',()=>this.exploreSelection());
-  button('Navigate',()=>this.setMode('select'));
-  button('Move images',()=>this.setMode('move'));
-  const actions=button('Actions',()=>{const r=actions.getBoundingClientRect();this.menu({clientX:r.left,clientY:r.bottom},this.selectionHit());});
-  button('Properties',()=>this.openInspector());
-  const exports=button('Export',()=>{const r=exports.getBoundingClientRect(),menu=new Menu();this.exportMenu(menu);menu.showAtPosition({x:r.left,y:r.bottom});});
-  button('Example connections',()=>this.run(()=>this.host.seedDemo()));
-  this.explorationControls=root.createDiv({cls:'image-graph-exploration is-hidden'});
-  this.explorationControls.createSpan({text:'Connection depth '});this.depthSelect=this.explorationControls.createEl('select',{attr:{'aria-label':'Connection depth'}});for(const n of [1,2,3])this.depthSelect.createEl('option',{attr:{value:String(n)},text:`${n} hop${n===1?'':'s'}`});
+  const button=(host:HTMLElement,text:string,action:()=>void)=>{const b=host.createEl('button',{text});this.registerDomEvent(b,'click',action);return b;};
+  /* One fixed row. Everything that comes and goes floats over the canvas instead, because a
+   * row that appears pushes the canvas down: entering an exploration used to move the picture
+   * under the pointer. Measured before this: 45px of chrome in the vault, 88px exploring. */
+  const where=bar.createDiv({cls:'image-graph-tools',attr:{role:'group','aria-label':'View'}});
+  this.vaultButton=button(where,'Vault',()=>{if(this.exploration)this.exitExploration();});
+  this.exploreButton=button(where,'Explore',()=>this.exploreSelection());
+  this.vaultButton.addClass('image-graph-tool');this.exploreButton.addClass('image-graph-tool');
+  /* A relation is not an object on the canvas, so it cannot be clicked the way a picture can.
+   * Without a list of its own it could only be reached by pressing Explore with nothing
+   * chosen, which nothing on screen said. The caret is that list, in both views. */
+  const caret=where.createEl('button',{cls:'image-graph-tool image-graph-caret',attr:{'aria-label':'Explore a relation','aria-haspopup':'menu'}});
+  setIcon(caret,'chevron-down');
+  this.registerDomEvent(caret,'click',()=>{
+   const names=relationNames(this.snapshot);
+   const rect=caret.getBoundingClientRect(),menu=new Menu();
+   if(!names.length)menu.addItem(item=>item.setTitle('No connection carries a relation yet').setDisabled(true));
+   else{
+    const counts=new Map<string,number>();
+    for(const edge of this.snapshot.edges){const name=relationOf(edge.properties);if(name)counts.set(name,(counts.get(name)??0)+1);}
+    for(const name of names.slice(0,12))menu.addItem(item=>item.setTitle(`${name} — ${counts.get(name)??0}`).setChecked(this.exploration?.relation===name).onClick(()=>this.exploreRelation(name)));
+    if(names.length>12)menu.addItem(item=>item.setTitle(`All ${names.length} relations…`).onClick(()=>this.exploreRelationPicker()));
+   }
+   menu.showAtPosition({x:rect.left,y:rect.bottom});
+  });
+  button(bar,'Find',()=>this.findImage());
+  /* One group for the five tools. Rectangle, polygon and connect had no button at all, so
+   * somebody who never pressed R and never right-clicked could not draw a region. The label
+   * is beside the icon on a wide pane and hidden on a narrow one; an icon that fails to
+   * resolve therefore still leaves a readable button. */
+  const tools=bar.createDiv({cls:'image-graph-tools',attr:{role:'group','aria-label':'Tool'}});
+  const tool=(mode:Mode,icon:string,name:string,keys:string,action:()=>void)=>{
+   const b=tools.createEl('button',{cls:'image-graph-tool',attr:{'aria-label':`${name} (${keys})`}});
+   const glyph=b.createSpan({cls:'image-graph-tool-icon'});setIcon(glyph,icon);
+   b.createSpan({cls:'image-graph-tool-label',text:name});
+   this.registerDomEvent(b,'click',action);return{button:b,mode};
+  };
+  this.modeButtons=[
+   tool('select','mouse-pointer','Navigate','V',()=>this.setMode('select')),
+   tool('move','move','Move','M',()=>this.setMode('move')),
+   tool('rect','square','Region','R',()=>this.setMode('rect')),
+   tool('polygon','pen-tool','Polygon','G',()=>this.setMode('polygon')),
+   tool('connect','git-fork','Connect','C',()=>{const hit=this.selectionHit();this.beginConnect(hit&&'endpoint'in hit?hit.endpoint:undefined);}),
+  ];
+  const right=bar.createDiv({cls:'image-graph-toolbar-end'});
+  /* The Export button was a strict duplicate: `menu()` already ends with `exportMenu`. */
+  const actions=right.createEl('button',{cls:'image-graph-icon-button',attr:{'aria-label':'Actions, export and undo'}});setIcon(actions,'more-horizontal');
+  this.registerDomEvent(actions,'click',()=>{const r=actions.getBoundingClientRect();this.menu({clientX:r.left,clientY:r.bottom},this.selectionHit());});
+  const properties=right.createEl('button',{cls:'image-graph-icon-button',attr:{'aria-label':'Properties panel'}});setIcon(properties,'panel-right');
+  this.registerDomEvent(properties,'click',()=>this.toggleInspector());
+  const body=root.createDiv({cls:'image-graph-body'}),stage=body.createDiv({cls:'image-graph-stage'});
+  /* Obsidian renders `aria-label` as a hover tooltip, so a sentence here parked a tooltip
+   * over the status line for as long as the pointer was on the canvas. The words are the
+   * same; they now reach a screen reader and not the eye. */
+  const id=`image-graph-${Math.random().toString(36).slice(2,10)}`;
+  this.canvas=stage.createEl('canvas',{cls:'image-graph-canvas',attr:{tabindex:'0','aria-labelledby':`${id}-name`,'aria-describedby':`${id}-help`}});
+  stage.createSpan({cls:'image-graph-sr-only',attr:{id:`${id}-name`},text:'Image graph'});
+  stage.createSpan({cls:'image-graph-sr-only',attr:{id:`${id}-help`},text:'Scroll to pan, ctrl and scroll to zoom. R draws a rectangle. C connects. E explores. Question mark lists every shortcut.'});
+  /* The counts are read, not announced. They change on every frame of a pan, and a live
+   * region that says so is a screen reader talking over the gesture. */
+  /* One strip, at the bottom left. The bottom right is Obsidian's own status bar, which
+   * draws over the leaf: a zoom control there is half hidden behind the word count. */
+  const footer=body.createDiv({cls:'image-graph-footer'});
+  this.announcer=body.createDiv({cls:'image-graph-sr-only',attr:{role:'status','aria-live':'polite'}});
+  this.zoomBar=footer.createDiv({cls:'image-graph-zoom',attr:{role:'group','aria-label':'Zoom'}});
+  const zoomOut=this.zoomBar.createEl('button',{text:'\u2212',attr:{'aria-label':'Zoom out'}});this.registerDomEvent(zoomOut,'click',()=>this.zoomStep(1/1.25));
+  this.zoomLabel=this.zoomBar.createEl('button',{cls:'image-graph-zoom-level',attr:{'aria-label':'Zoom to fit everything'}});this.registerDomEvent(this.zoomLabel,'click',()=>this.zoomPreset('all'));
+  const zoomIn=this.zoomBar.createEl('button',{text:'+',attr:{'aria-label':'Zoom in'}});this.registerDomEvent(zoomIn,'click',()=>this.zoomStep(1.25));
+  /* Depth and relation are view state, the same family as "60%", so they live beside it
+   * rather than in a row of their own that the canvas has to make room for. */
+  this.explorationControls=footer.createDiv({cls:'image-graph-exploration is-hidden',attr:{role:'group','aria-label':'Exploration'}});
+  this.depthSelect=this.explorationControls.createEl('select',{attr:{'aria-label':'Connection depth'}});for(const n of [1,2,3])this.depthSelect.createEl('option',{attr:{value:String(n)},text:`${n} hop${n===1?'':'s'}`});
   this.registerDomEvent(this.depthSelect,'change',()=>this.setDepth(Number(this.depthSelect.value)));
   this.relationSelect=this.explorationControls.createEl('select',{attr:{'aria-label':'Relation filter'}});this.registerDomEvent(this.relationSelect,'change',()=>this.setRelationFilter(this.relationSelect.value));
-  const fit=this.explorationControls.createEl('button',{text:'Fit connections'});this.registerDomEvent(fit,'click',()=>this.fit());
-  const focus=this.explorationControls.createEl('button',{text:'Focus selected'});this.registerDomEvent(focus,'click',()=>{const id=[...this.selected][0];if(id)this.focusImage(id);});
-  this.drawingControls=root.createDiv({cls:'image-graph-drawing-controls is-hidden'});this.drawingControls.createSpan({text:'Click polygon corners. Click the first corner or Finish to close.'});
+  this.jobChip=footer.createDiv({cls:'image-graph-job is-hidden'});
+  this.jobText=this.jobChip.createSpan();
+  this.jobStop=this.jobChip.createEl('button',{text:'\u2715',attr:{'aria-label':'Stop background work'}});
+  this.registerDomEvent(this.jobStop,'click',()=>{this.host.stopJobs();new Notice('Background work stopped. Nothing is lost; it resumes when you ask.');});
+  this.status=footer.createDiv({cls:'image-graph-status'});
+  // Every mode that takes over the pointer says so and offers a way out. Only polygon had
+  // one before, so rectangle and connect could be entered with no visible way back.
+  this.drawingControls=body.createDiv({cls:'image-graph-drawing-controls is-hidden'});
+  this.drawingText=this.drawingControls.createSpan();
   this.finishButton=this.drawingControls.createEl('button',{text:'Finish polygon'});this.registerDomEvent(this.finishButton,'click',()=>this.finishPolygon());
-  const undo=this.drawingControls.createEl('button',{text:'Undo point'});this.registerDomEvent(undo,'click',()=>{this.polygon?.points.pop();this.canvas.focus();this.schedule();});
+  this.undoPointButton=this.drawingControls.createEl('button',{text:'Undo point'});this.registerDomEvent(this.undoPointButton,'click',()=>{this.polygon?.points.pop();this.canvas.focus();this.schedule();});
   const cancel=this.drawingControls.createEl('button',{text:'Cancel'});this.registerDomEvent(cancel,'click',()=>this.setMode('select'));
-  const body=root.createDiv({cls:'image-graph-body'}),stage=body.createDiv({cls:'image-graph-stage'});
-  this.canvas=stage.createEl('canvas',{cls:'image-graph-canvas',attr:{tabindex:'0','aria-label':'Image graph. Scroll to pan, ctrl and scroll to zoom. R draws a rectangle. C connects. E explores. Question mark lists every shortcut.'}});
-  this.status=body.createDiv({cls:'image-graph-status',attr:{role:'status'}});this.pathText=body.createDiv({cls:'image-graph-path is-hidden'});
+  this.pathText=body.createDiv({cls:'image-graph-path is-hidden'});
   this.inspector=body.createDiv({cls:'image-graph-inspector is-hidden'});
   this.registerDomEvent(this.canvas,'pointerdown',event=>this.pointerDown(event));
   this.registerDomEvent(this.canvas,'pointermove',event=>this.pointerMove(event));
@@ -143,9 +260,11 @@ export class ImageGraphView extends ItemView {
   this.observer=new ResizeObserver(()=>{const ratio=this.win.devicePixelRatio||1;this.canvas.width=Math.max(1,Math.round(this.canvas.clientWidth*ratio));this.canvas.height=Math.max(1,Math.round(this.canvas.clientHeight*ratio));if(!this.initialized&&this.images.size){this.initialized=true;this.fit();}this.schedule();});this.observer.observe(stage);
   // A theme change alters every colour the canvas reads, and nothing else redraws it.
   this.registerEvent(this.app.workspace.on('css-change',()=>{this.layerVersion++;this.schedule();}));
-  this.unsubscribe=this.host.subscribe(()=>this.refresh());this.refresh();
+  this.unsubscribe=this.host.subscribe(()=>this.refresh());
+  this.unsubscribeJobs=this.host.subscribeJobs(()=>this.schedule());
+  this.refresh();
  }
- async onClose():Promise<void>{this.active=false;this.metadataTicket++;this.clearLongPress();this.win.clearTimeout(this.zoomTimer);for(const builder of this.propertyBuilders)builder.dispose();this.propertyBuilders=[];this.unsubscribe?.();this.unsubscribe=null;this.observer?.disconnect();this.observer=null;this.win.cancelAnimationFrame(this.raf);this.raf=0;this.pointers.clear();this.releaseLayer();}
+ async onClose():Promise<void>{this.active=false;this.metadataTicket++;this.clearLongPress();this.win.clearTimeout(this.zoomTimer);for(const builder of this.propertyBuilders)builder.dispose();this.propertyBuilders=[];this.unsubscribe?.();this.unsubscribe=null;this.unsubscribeJobs?.();this.unsubscribeJobs=null;this.observer?.disconnect();this.observer=null;this.win.cancelAnimationFrame(this.raf);this.raf=0;this.pointers.clear();this.releaseLayer();}
  private refresh(){
   if(!this.active)return;this.snapshot=this.host.getSnapshot();this.images=new Map(this.snapshot.images.map(i=>[i.id,i]));this.regions=new Map(this.snapshot.regions.map(r=>[r.id,r]));this.regionsByImage.clear();
   this.captions=imageCaptions(this.snapshot.images,this.snapshot.regions,this.snapshot.edges);
@@ -153,7 +272,7 @@ export class ImageGraphView extends ItemView {
   this.wholePositions=new Map(this.snapshot.images.map(i=>[i.id,copy(i)]));this.wholeIds=this.snapshot.images.map(i=>i.id);
   this.pruneSelection(id=>this.images.has(id));this.hoverRead=null;
   if(this.draft?.kind==='resize'&&!this.regions.has(this.draft.regionId))this.draft=null;
-  const value=this.exploration?.filter??'';this.relationSelect.empty();this.relationSelect.createEl('option',{attr:{value:''},text:'All relations'});for(const label of [...new Set(this.snapshot.edges.map(relation))].filter(Boolean).sort())this.relationSelect.createEl('option',{attr:{value:label},text:label});this.relationSelect.value=value;
+  const value=this.exploration?.relation??this.exploration?.filter??'';this.relationSelect.empty();this.relationSelect.createEl('option',{attr:{value:''},text:this.exploration?.relation?'Leave this relation':'All relations'});for(const label of [...new Set(this.snapshot.edges.map(relation))].filter(Boolean).sort())this.relationSelect.createEl('option',{attr:{value:label},text:label});this.relationSelect.value=value;
   if(this.exploration)this.rebuild(false);this.schedule();
  }
  private shownIds():readonly string[]{return this.exploration?.graph.ids??this.wholeIds;}
@@ -169,7 +288,11 @@ export class ImageGraphView extends ItemView {
  private schedule(){if(!this.active||this.raf)return;this.raf=this.win.requestAnimationFrame(()=>{this.raf=0;this.draw();});}
  private draw(){
   const ctx=this.canvas.getContext('2d');if(!ctx)return;this.readHover();const start=performance.now(),w=this.canvas.clientWidth,h=this.canvas.clientHeight,ratio=this.win.devicePixelRatio||1;
-  const css=this.win.getComputedStyle(this.contentEl),bg=css.getPropertyValue('--background-primary').trim()||'#181b20',card=css.getPropertyValue('--background-secondary').trim()||'#333840',fg=css.getPropertyValue('--text-normal').trim()||'#ddd',accent=css.getPropertyValue('--interactive-accent').trim()||'#7bbda8';
+  const css=this.win.getComputedStyle(this.contentEl),colour=(name:string,fallback:string)=>css.getPropertyValue(name).trim()||fallback;
+  // Every colour on the canvas comes from the theme. The eight that did not ignored a
+  // light theme and the owner's own accent, and were never measured for contrast.
+  const bg=colour('--background-primary','#181b20'),card=colour('--background-secondary','#333840'),fg=colour('--text-normal','#ddd'),accent=colour('--interactive-accent','#7bbda8');
+  const picked=colour('--color-yellow','#ffe0a0'),regionColour=colour('--color-green','#69dfb0'),regionHover=colour('--color-cyan','#a6f5d2'),missing=colour('--background-modifier-error','#733c43');
   ctx.setTransform(ratio,0,0,ratio,0,0);ctx.fillStyle=bg;ctx.fillRect(0,0,w,h);const s=this.camera.scale;let visible=0;
   // Limit demand as well as cache size: otherwise a dense viewport can repeatedly
   // evict and re-request its own thumbnails on every completion redraw.
@@ -181,7 +304,7 @@ export class ImageGraphView extends ItemView {
   for(const id of detailed){const r=this.positions.get(id)!,size=detailSize(Math.max(r.width,r.height)*s*ratio);if(detailBytes+size*size*4>64*1024*1024||thumbnailIds.size>=120)continue;thumbnailIds.add(id);detailBytes+=size*size*4;}
   // Below the detail threshold every image is one atlas tile, so a bitmap of the viewport
   // and its margin stands in for tens of thousands of draw calls while the camera pans.
-  const layer=!detailed.length&&!this.zoomCursor&&!this.pinch&&this.drag?.kind!=='image'?this.tileLayer(w,h,ratio,card,bg):null;
+  const layer=!detailed.length&&!this.zoomCursor&&!this.pinch&&this.drag?.kind!=='image'?this.tileLayer(w,h,ratio,card,bg,missing):null;
   // Blit in device pixels: a fractional offset would resample the whole mosaic and soften it.
   if(layer){ctx.setTransform(1,0,0,1,0,0);ctx.drawImage(layer.canvas,Math.round((this.camera.x-layer.camera.x)*ratio),Math.round((this.camera.y-layer.camera.y)*ratio));ctx.setTransform(ratio,0,0,ratio,0,0);}
   ctx.save();ctx.translate(this.camera.x,this.camera.y);ctx.scale(this.camera.scale,this.camera.scale);
@@ -200,15 +323,15 @@ export class ImageGraphView extends ItemView {
   const many=this.selectionImages.size>1;
   const ring=(r:Rect,style:string,width:number)=>{ctx.strokeStyle=style;ctx.lineWidth=width/s;ctx.strokeRect(r.x,r.y,r.width,r.height);};
   const outline=(id:string,r:Rect)=>{
-   if(this.selected.has(id))ring(r,'#ffe0a0',many?1.5:2);
-   else if(this.exploration?.root===id)ring(r,accent,2);
+   if(this.selected.has(id))ring(r,picked,many?1.5:2);
+   else if(this.exploration?.isRoot(id))ring(r,accent,2);
    else if(id===hovered?.imageId){ctx.globalAlpha=.55;ring(r,accent,1.5);ctx.globalAlpha=1;}
   };
-  if(layer){const ringed=new Set(this.selected);if(this.exploration)ringed.add(this.exploration.root);if(hovered)ringed.add(hovered.imageId);
-   for(const id of ringed){const r=this.positions.get(id);if(r&&this.visible(r,w,h))outline(id,r);}
+  if(layer){const ringed=new Set(this.selected);if(this.exploration)for(const id of this.exploration.roots)ringed.add(id);if(hovered)ringed.add(hovered.imageId);
+   for(const id of ringed){const r=this.positions.get(id);if(r&&onScreen(r,this.camera,w,h))outline(id,r);}
   }else for(const id of shown){
    const image=this.images.get(id),r=this.positions.get(id);if(!image||!r)continue;
-   ctx.fillStyle=image.missing?'#733c43':card;ctx.fillRect(r.x,r.y,r.width,r.height);
+   ctx.fillStyle=image.missing?missing:card;ctx.fillRect(r.x,r.y,r.width,r.height);
    const thumb=thumbnailIds.has(id)?this.host.thumbnail(image,this.redraw,Math.max(r.width,r.height)*s*ratio):null;
    if(thumb)ctx.drawImage(thumb,r.x,r.y,r.width,r.height);
    else{const tile=this.host.overviewThumbnail(image,this.redraw);if(tile)ctx.drawImage(tile.source,tile.x,tile.y,tile.width,tile.height,r.x,r.y,r.width,r.height);}
@@ -219,22 +342,25 @@ export class ImageGraphView extends ItemView {
     const text=shortenLabel(label,r.width,t=>ctx.measureText(t).width);
     const box={x:r.x,y:r.y+r.height+3/s,width:r.width,height:19/s};
     if(!this.spatial().query(box).length&&!captionBoxes.some(other=>overlaps(box,other))){ctx.fillText(text,r.x,box.y+13/s);captionBoxes.push(box);}
-    if(this.exploration?.root===id){
+    if(this.exploration?.isRoot(id)){
      const badge='Starting image',width=ctx.measureText(badge).width+12/s;
      const box={x:r.x,y:r.y-25/s,width,height:20/s};captionBoxes.push(box);
      ctx.fillStyle=accent;ctx.fillRect(box.x,box.y,box.width,box.height);ctx.fillStyle=bg;ctx.fillText(badge,box.x+6/s,box.y+14/s);
     }
    }
   }
-  if(many){const band=this.bounds(this.selected);if(band){ctx.save();ctx.setLineDash([7/s,5/s]);ring({x:band.x-6/s,y:band.y-6/s,width:band.width+12/s,height:band.height+12/s},'#ffe0a0',1);ctx.restore();}}
+  if(many){const band=this.bounds(this.selected);if(band){ctx.save();ctx.setLineDash([7/s,5/s]);ring({x:band.x-6/s,y:band.y-6/s,width:band.width+12/s,height:band.height+12/s},picked,1);ctx.restore();}}
   const resizing=this.draft?.kind==='resize'?this.draft:null;
   if(s>.06)for(const id of shown){const r=this.positions.get(id);if(!r)continue;for(const region of this.regionsByImage.get(id)??[]){
-   const chosen=region.id===this.selectedRegion,shape=resizing?.regionId===region.id?resizing.shape:region.shape;
+   const chosen=region.id===this.selectedRegion,shape=resizing?.regionId===region.id?resizing.shape:region.shape,foreign=isForeignRegion(region);
    const active=chosen||region.id===hovered?.regionId||activeRegions.has(region.id);
-   ctx.globalAlpha=active?1:(this.exploration?.root===id ? .2 : .12);
-   ctx.strokeStyle=chosen?'#ffe0a0':region.id===hovered?.regionId?'#a6f5d2':'#69dfb0';ctx.lineWidth=(chosen?3:active?1.5:1)/s;this.shape(ctx,r,shape);ctx.stroke();ctx.globalAlpha=1;
+   ctx.globalAlpha=active?1:(this.exploration?.isRoot(id) ? .2 : .12);
+   // A dashed outline is a region another plugin drew: shown here, edited there.
+   if(foreign)ctx.setLineDash([6/s,4/s]);
+   ctx.strokeStyle=chosen?picked:region.id===hovered?.regionId?regionHover:regionColour;ctx.lineWidth=(chosen?3:active?1.5:1)/s;this.shape(ctx,r,shape);ctx.stroke();ctx.globalAlpha=1;
+   if(foreign)ctx.setLineDash([]);
    // Grips appear only where they can be gripped: eight of them inside 24 screen pixels is a smear.
-   if(chosen&&Math.min(r.width,r.height)*s>48){ctx.fillStyle='#ffe0a0';const size=4/s;
+   if(chosen&&!foreign&&Math.min(r.width,r.height)*s>48){ctx.fillStyle=picked;const size=4/s;
     for(const grip of regionHandles(shape))ctx.fillRect(r.x+grip.x*r.width-size,r.y+grip.y*r.height-size,size*2,size*2);}
   }}
   // Labels are collected and placed after every line is drawn, so one can see the others
@@ -243,11 +369,12 @@ export class ImageGraphView extends ItemView {
   // Routing wants a settled layout: during an image drag every rectangle moves each frame,
   // and a path recomputed per frame flickers more than a straight line offends.
   const routing=s>.06&&drawn.length<=ImageGraphView.ROUTE_LIMIT&&this.drag?.kind!=='image';
+  this.routed=routing;
   for(const edge of drawn){
    const{source:a,target:b}=edgeEndpoints(edge,this.positions,this.regions),style=edgeStyles.get(edge.id)!;
    const {alpha}=style;
    const path=routing?this.route(edge,a,b):[a,b];
-   ctx.globalAlpha=alpha;ctx.strokeStyle=ctx.fillStyle=style.emphasized?'#ffe0a0':accent;ctx.lineWidth=style.width/s;
+   ctx.globalAlpha=alpha;ctx.strokeStyle=ctx.fillStyle=style.emphasized?picked:accent;ctx.lineWidth=style.width/s;
    this.strokePath(ctx,path,s);
    const arrow=(from:Point,to:Point)=>{const angle=Math.atan2(to.y-from.y,to.x-from.x),size=9/s;ctx.beginPath();ctx.moveTo(to.x,to.y);ctx.lineTo(to.x-size*Math.cos(angle-.45),to.y-size*Math.sin(angle-.45));ctx.lineTo(to.x-size*Math.cos(angle+.45),to.y-size*Math.sin(angle+.45));ctx.closePath();ctx.fill();};
    if(s>.06){
@@ -259,19 +386,94 @@ export class ImageGraphView extends ItemView {
   }ctx.globalAlpha=1;
   this.drawLabels(ctx,labels,s,bg,fg,captionBoxes);
   const drag=this.drag;
-  if(drag?.kind==='marquee'&&drag.marquee){const band=this.band(drag.start,drag.marquee.last);ctx.save();ctx.setLineDash([6/s,4/s]);ctx.strokeStyle='#ffe0a0';ctx.lineWidth=1/s;ctx.strokeRect(band.x,band.y,band.width,band.height);ctx.restore();}
+  if(drag?.kind==='marquee'&&drag.marquee){const band=this.band(drag.start,drag.marquee.last);ctx.save();ctx.setLineDash([6/s,4/s]);ctx.strokeStyle=picked;ctx.lineWidth=1/s;ctx.strokeRect(band.x,band.y,band.width,band.height);ctx.restore();}
   const draft=this.draft;
-  if(draft?.kind==='region'){const r=this.positions.get(draft.imageId);if(r){ctx.strokeStyle='#ffe0a0';ctx.lineWidth=2/s;this.shape(ctx,r,this.rectangle(draft.start,draft.last,r));ctx.stroke();}}
-  if(draft?.kind==='polygon'){const r=this.positions.get(draft.imageId);if(r){ctx.strokeStyle='#ffe0a0';ctx.lineWidth=2/s;this.shape(ctx,r,{type:'polygon',points:draft.points});ctx.stroke();for(const [index,p]of draft.points.entries()){ctx.beginPath();ctx.arc(r.x+p.x*r.width,r.y+p.y*r.height,(index===0?6:4)/s,0,Math.PI*2);ctx.fillStyle=index===0?'#69dfb0':'#ffe0a0';ctx.fill();}}}
+  if(draft?.kind==='region'){const r=this.positions.get(draft.imageId);if(r){ctx.strokeStyle=picked;ctx.lineWidth=2/s;this.shape(ctx,r,this.rectangle(draft.start,draft.last,r));ctx.stroke();}}
+  if(draft?.kind==='polygon'){const r=this.positions.get(draft.imageId);if(r){ctx.strokeStyle=picked;ctx.lineWidth=2/s;this.shape(ctx,r,{type:'polygon',points:draft.points});ctx.stroke();for(const [index,p]of draft.points.entries()){ctx.beginPath();ctx.arc(r.x+p.x*r.width,r.y+p.y*r.height,(index===0?6:4)/s,0,Math.PI*2);ctx.fillStyle=index===0?regionColour:picked;ctx.fill();}}}
   ctx.restore();this.stats={visible,drawMs:performance.now()-start,frameMs:this.lastDraw?start-this.lastDraw:0};this.lastDraw=start;
   const ex=this.exploration;this.explorationControls.toggleClass('is-hidden',!ex);
-  this.drawingControls.toggleClass('is-hidden',this.mode!=='polygon');this.finishButton.disabled=(this.polygon?.points.length??0)<3;
+  this.depthSelect.toggleClass('is-hidden',!ex?.countsHops);
+  if(this.renderedWhere!==!!ex){this.renderedWhere=!!ex;
+   this.vaultButton.toggleClass('is-active',!ex);this.vaultButton.setAttribute('aria-pressed',String(!ex));
+   this.exploreButton.toggleClass('is-active',!!ex);this.exploreButton.setAttribute('aria-pressed',String(!!ex));}
+  this.syncModeBar();
   this.canvas.dataset.mode=this.drag?.kind==='pan'?'panning':this.zoomCursor??this.mode;
+  this.syncModeButtons();
   this.canvas.dataset.over=this.drag?'':this.grip?'grip':this.hover?'target':'';
-  const progress=this.host.thumbnailProgress();
-  this.status.setText(`${ex?`${ex.graph.ids.length} connected / `:''}${this.images.size.toLocaleString()} images · ${visible.toLocaleString()} visible · ${this.mode==='select'?'Drag to pan · shift-drag selects · ? lists the shortcuts':this.mode==='move'?'Drag an image to move · whole-vault positions snap to the 40px grid · Escape to pan':this.mode==='connect'?(this.pending?'Choose target':'Choose source'):`Draw ${this.mode}`} ${ex?.graph.capped?'· Neighborhood limit: 150':''}${filter?` · ${this.shownEdges().filter(e=>relation(e)===filter).length} matching links; context dimmed`:''}${progress.ready<progress.total?` · Overview thumbnails ${progress.ready.toLocaleString()}/${progress.total.toLocaleString()}`:''}`);
-  this.pathText.toggleClass('is-hidden',!ex);if(ex){const target=[...this.selected][0];this.pathText.setText(target&&target!==ex.root&&steps.length?`One shortest path · ${steps.length} hops\n`+steps.map(step=>{const e=step.edge,forward=e.source.imageId===step.from,from=forward?e.source:e.target,to=forward?e.target:e.source,arrow=e.direction==='both'?'↔':e.direction==='none'?'—':(e.direction==='forward')===forward?'→':'←';return `${this.describe(from)} ${arrow} ${relation(e)} ${arrow} ${this.describe(to)}`;}).join('\n'):'Starting image anchored · select an image to trace its path. Links can be traversed either way.');}
+  this.syncStatus(visible,filter);this.announce();
+  this.pathText.toggleClass('is-hidden',!ex);if(ex?.relation){this.pathText.setText(`Every connection labelled “${ex.relation}” · ${ex.graph.ids.length} image${ex.graph.ids.length===1?'':'s'}${ex.graph.capped?` · limit ${EXPLORE_LIMIT}`:''}. Choose another relation below, or Vault to leave.`);}else if(ex){const target=[...this.selected][0];this.pathText.setText(target&&!ex.isRoot(target)&&steps.length?`One shortest path · ${steps.length} hops\n`+steps.map(step=>{const e=step.edge,forward=e.source.imageId===step.from,from=forward?e.source:e.target,to=forward?e.target:e.source,arrow=e.direction==='both'?'↔':e.direction==='none'?'—':(e.direction==='forward')===forward?'→':'←';return `${this.describe(from)} ${arrow} ${relation(e)} ${arrow} ${this.describe(to)}`;}).join('\n'):ex.roots.length>1?`${ex.roots.length} starting images · select another to trace its path from the first.`:'Starting image anchored · select an image to trace its path. Links can be traversed either way.');}
  }
+ private syncModeBar(){
+  const drawing=this.mode==='rect'||this.mode==='polygon'||this.mode==='connect',polygon=this.mode==='polygon';
+  this.drawingControls.toggleClass('is-hidden',!drawing);
+  if(!drawing)return;
+  this.drawingText.setText(polygon?'Click polygon corners. Click the first corner or Finish to close.'
+   :this.mode==='rect'?'Drag across an image to draw a rectangle region.'
+   :this.pending?'Choose the other end of the connection.':'Choose where the connection starts.');
+  this.finishButton.toggleClass('is-hidden',!polygon);
+  this.undoPointButton.toggleClass('is-hidden',!polygon);
+  this.finishButton.disabled=(this.polygon?.points.length??0)<3;
+ }
+ /** One fact per part, joined once. The nested template this replaced could not be read, and
+  * it printed a stray space wherever an optional part was absent. */
+ private syncStatus(visible:number,filter:string){
+  const ex=this.exploration;
+  const parts=[`${ex?`${ex.graph.ids.length} connected / `:''}${this.images.size.toLocaleString()} images`,`${visible.toLocaleString()} visible`];
+  if(ex?.relation)parts.push(`every “${ex.relation}” connection`);
+  if(this.selected.size>1)parts.push(`${this.selected.size} selected`);
+  parts.push(this.mode==='select'?'Drag to pan · shift-drag selects · ? lists the shortcuts'
+   :this.mode==='move'?'Drag an image to move · shift-drag selects · positions snap to the 40px grid'
+   :this.mode==='connect'?(this.pending?'Choose target':'Choose source')
+   :this.mode==='rect'?'Drag across an image to draw a region':'Click the corners of a region');
+  if(ex?.graph.capped)parts.push(`Neighborhood limit: ${EXPLORE_LIMIT}`);
+  if(filter)parts.push(`${this.shownEdges().filter(e=>relation(e)===filter).length} matching links; context dimmed`);
+  const text=parts.join(' · ');
+  if(text!==this.statusText){this.statusText=text;this.status.setText(text);}
+  const zoom=`${Math.round(this.camera.scale*100)}%`;
+  if(zoom!==this.renderedZoom){this.renderedZoom=zoom;this.zoomLabel.setText(zoom);}
+  this.syncJob();
+ }
+ /** Background work gets a chip of its own rather than a number wedged into the status, and
+  * the chip carries the only way to stop it. Both passes cache per item, so stopping loses
+  * nothing: each resumes where it left off. */
+ private syncJob(){
+  const job=this.host.jobState();
+  this.jobChip.toggleClass('is-hidden',!job);
+  if(!job)  {this.renderedJob='';return;}
+  const percent=job.total?Math.min(100,Math.round(job.done/job.total*100)):0;
+  const text=`${job.name} ${job.done.toLocaleString()} / ${job.total.toLocaleString()}`;
+  if(text===this.renderedJob)return;
+  this.renderedJob=text;
+  this.jobText.setText(text);
+  this.jobStop.toggleClass('is-hidden',!job.stoppable);
+  this.jobChip.style.setProperty('--image-graph-job-progress',`${percent}%`);
+ }
+ /** Said aloud, not printed: the tool and the selection are the two things a person who
+  * cannot see the canvas has no other way to learn. Never mid-gesture. */
+ private announce(){
+  if(this.drag)return;
+  const tool=this.mode==='select'?'Navigate':this.mode==='move'?'Move':this.mode==='rect'?'Region':this.mode==='polygon'?'Polygon':'Connect';
+  const what=this.selection.kind==='edge'?'connection selected':this.selection.kind==='region'?'region selected'
+   :this.selected.size?`${this.selected.size} image${this.selected.size===1?'':'s'} selected`:'nothing selected';
+  const text=`${tool} tool. ${what}.`;
+  if(text===this.announced)return;
+  this.announced=text;this.announcer.setText(text);
+ }
+ private zoomStep(factor:number){const r=this.canvas.getBoundingClientRect();this.zoomAt(factor,{x:r.left+r.width/2,y:r.top+r.height/2});}
+ /** Find an image by name or folder, from anywhere. */
+ findImage(){
+  const images=this.snapshot.images.filter(image=>!image.missing);
+  if(!images.length){new Notice('This vault has no images yet.');return;}
+  new ImagePicker(this.app,images,image=>`${this.captions.get(image.id)??''} — ${image.path}`,image=>this.reveal(image.id)).open();
+ }
+ /** Bring one image into view from anywhere. An exploration that does not hold it is left
+  * first, because the answer to "where is this" is never "it is not on screen". */
+ reveal(imageId:string):boolean{
+  if(!this.images.has(imageId))return false;
+  if(this.exploration&&!this.exploration.positions.has(imageId))this.exitExploration();
+  this.focusImage(imageId);this.canvas.focus();this.openInspectorIfOpen();return true;
+ }
+ private openInspectorIfOpen(){if(!this.inspector.hasClass('is-hidden'))this.renderInspector();}
  /** A label at the midpoint of a connection lands on an image about half the time. Try a few
   * points along the line and a step to either side, and take the first that is clear of the
   * images and of the labels already placed. */
@@ -329,7 +531,7 @@ export class ImageGraphView extends ItemView {
  /** Atlas tiles for the whole shown set, rendered once into a bitmap that covers the viewport
   * and a margin. Reused until the scale, the data, or the camera leaves that margin. Selection
   * rings and labels stay outside it so a click never rebuilds it. */
- private tileLayer(w:number,h:number,ratio:number,card:string,bg:string):TileLayer|null{
+ private tileLayer(w:number,h:number,ratio:number,card:string,bg:string,missing:string):TileLayer|null{
   const margin=Math.round(Math.min(w,h)*.25*ratio)/ratio,width=w+margin*2,height=h+margin*2,doc=this.contentEl.ownerDocument;
   const current=this.layer?.doc===doc?this.layer:this.releaseLayer();
   if(current&&current.ratio===ratio&&current.width===width&&current.height===height&&current.camera.scale===this.camera.scale&&current.positions===this.positions&&current.version===this.layerVersion&&current.card===card&&current.bg===bg){
@@ -343,7 +545,7 @@ export class ImageGraphView extends ItemView {
   ctx.setTransform(ratio,0,0,ratio,0,0);ctx.fillStyle=bg;ctx.fillRect(0,0,width,height);ctx.translate(camera.x,camera.y);ctx.scale(camera.scale,camera.scale);
   for(const id of this.spatial().query(this.viewRect(width,height,camera))){
    const image=this.images.get(id),r=this.positions.get(id);if(!image||!r)continue;
-   ctx.fillStyle=image.missing?'#733c43':card;ctx.fillRect(r.x,r.y,r.width,r.height);
+   ctx.fillStyle=image.missing?missing:card;ctx.fillRect(r.x,r.y,r.width,r.height);
    const tile=this.host.overviewThumbnail(image,this.redraw);
    if(tile)ctx.drawImage(tile.source,tile.x,tile.y,tile.width,tile.height,r.x,r.y,r.width,r.height);
   }
@@ -353,7 +555,6 @@ export class ImageGraphView extends ItemView {
  /** Drop the cached bitmap and its backing store. Returns null so a caller can rebuild. */
  private releaseLayer():null{const canvas=this.layer?.canvas;if(canvas){canvas.width=0;canvas.height=0;}this.layer=null;return null;}
  private shape(ctx:CanvasRenderingContext2D,r:Rect,shape:RegionShape){ctx.beginPath();if(shape.type==='rect')ctx.rect(r.x+shape.x*r.width,r.y+shape.y*r.height,shape.width*r.width,shape.height*r.height);else{shape.points.forEach((p,i)=>{if(i)ctx.lineTo(r.x+p.x*r.width,r.y+p.y*r.height);else ctx.moveTo(r.x+p.x*r.width,r.y+p.y*r.height);});if(shape.points.length>2)ctx.closePath();}}
- private visible(r:Rect,w:number,h:number,camera:Camera=this.camera){const x=r.x*camera.scale+camera.x,y=r.y*camera.scale+camera.y;return x<=w&&y<=h&&x+r.width*camera.scale>=0&&y+r.height*camera.scale>=0;}
  /** A connection's endpoints sit inside its two image rectangles, so their union bounds the line.
   * The margin keeps a midpoint label that overhangs the viewport, without drawing every distant edge. */
  private spans(a:Rect,b:Rect,w:number,h:number){
@@ -372,18 +573,27 @@ export class ImageGraphView extends ItemView {
   }
   return null;
  }
- /** Runs on every pointer move now, so each connection is rejected by its bounding box
-  * before the endpoints are resolved and the distance is measured. */
+ /** Runs on every pointer move, so a connection whose route the last frame did not compute is
+  * rejected by its bounding box before the endpoints are resolved and the distance is measured.
+  *
+  * A routed connection is measured against the polyline the frame drew, never against the
+  * straight line between its ends. The two part company by a whole image, which put the hit
+  * box somewhere the line was not: the pointer had to rest on empty canvas to select a
+  * connection, and resting on the line itself did nothing. Only the zoom below which routing
+  * stops, and the reach that grows as the scale shrinks, hid it when zoomed far out. */
  private hit(p:Point):Hit|null{
   const endpoint=this.endpointAt(p);if(endpoint?.regionId)return{endpoint};
-  const edges=this.shownEdges(),reach=7/this.camera.scale;
+  const edges=this.shownEdges(),reach=ImageGraphView.REACH/this.camera.scale;
   for(let i=edges.length-1;i>=0;i--){
-   const edge=edges[i],source=this.positions.get(edge.source.imageId),target=this.positions.get(edge.target.imageId);
+   const edge=edges[i];
+   const route=this.routed?this.routes.get(edge.id):null;
+   if(route){if(distanceToPath(p,route)<reach)return{edge};continue;}
+   const source=this.positions.get(edge.source.imageId),target=this.positions.get(edge.target.imageId);
    if(!source||!target)continue;
    if(p.x<Math.min(source.x,target.x)-reach||p.x>Math.max(source.x+source.width,target.x+target.width)+reach)continue;
    if(p.y<Math.min(source.y,target.y)-reach||p.y>Math.max(source.y+source.height,target.y+target.height)+reach)continue;
    const{source:a,target:b}=edgeEndpoints(edge,this.positions,this.regions);
-   if(distance(p,a,b)<reach)return{edge};
+   if(distanceToPath(p,[a,b])<reach)return{edge};
   }
   return endpoint?{endpoint}:null;
  }
@@ -397,7 +607,7 @@ export class ImageGraphView extends ItemView {
   const imageId=[...this.selectionImages][0];return imageId?{endpoint:{imageId}}:null;
  }
  private describe(e:Endpoint){return `${this.images.get(e.imageId)?.path.split('/').pop()??'Missing image'}${e.regionId?' / '+(this.regions.get(e.regionId)?.label??'region'):''}`;}
- private path(){const ex=this.exploration,target=[...this.selected][0];return ex&&target?tracePath(ex.root,target,ex.graph):[];}
+ private path(){const ex=this.exploration,anchor=ex?.anchor??null,target=[...this.selected][0];return ex&&anchor!==null&&target?tracePath(anchor,target,ex.graph):[];}
  private clearLongPress(){this.win.clearTimeout(this.longPress);this.longPress=undefined;}
  /** Read what the pointer rests on. Called from the frame, so it costs once per frame
   * whatever the pointer's report rate, and never while a gesture owns the pointer. */
@@ -422,8 +632,9 @@ export class ImageGraphView extends ItemView {
   const p=this.world(event),grip=this.gripAt(p),endpoint=this.endpointAt(p),hit=this.mode!=='select'||event.altKey?(endpoint?{endpoint}:null):this.hit(p);
   this.drag={pointer:event.pointerId,kind:'waiting',start:p,screen:{x:event.clientX,y:event.clientY},origin:{...this.camera},hit,forcePan:this.space||event.button===1,forceMove:event.altKey||this.mode==='move'};
   // Shift already means extend, so shift-drag draws the band. Plain drag still pans,
-  // because this canvas is a map before it is an editor.
-  if(event.shiftKey&&!this.space&&event.button===0&&this.mode==='select')this.drag.marquee={base:this.selectionImages,last:p};
+  // because this canvas is a map before it is an editor. Move bands too: the selection a
+  // drag carries has to be makeable in the mode that carries it.
+  if(event.shiftKey&&!this.space&&event.button===0&&(this.mode==='select'||this.mode==='move'))this.drag.marquee={base:this.selectionImages,last:p};
   else if(grip&&!this.space&&event.button===0){this.drag.kind='handle';this.draft={kind:'resize',...grip,shape:grip.origin};}
   if(event.pointerType==='touch')this.longPress=this.win.setTimeout(()=>{if(this.drag?.kind==='waiting'){const target=this.drag.hit;this.drag=null;this.select(target);this.menu(event,target);}},550);
  }
@@ -460,36 +671,49 @@ export class ImageGraphView extends ItemView {
    if(this.mode==='connect'&&drag.hit&&'endpoint'in drag.hit)this.connect(drag.hit.endpoint);
    else if(this.mode==='polygon'&&drag.hit&&'endpoint'in drag.hit){const imageId=drag.hit.endpoint.imageId,r=this.positions.get(imageId)!;if(!this.draft)this.draft={kind:'polygon',imageId,points:[]};const polygon=this.polygon;if(polygon?.imageId===imageId){const p=this.world(event),point={x:clamp((p.x-r.x)/r.width,0,1),y:clamp((p.y-r.y)/r.height,0,1)},first=polygon.points[0],last=polygon.points.at(-1);if(first&&polygon.points.length>=3&&Math.hypot((point.x-first.x)*r.width,(point.y-first.y)*r.height)*this.camera.scale<10)this.finishPolygon();else if(!last||Math.hypot((point.x-last.x)*r.width,(point.y-last.y)*r.height)*this.camera.scale>3)polygon.points.push(point);this.setSelection(imageSelection([imageId]));}}
    else this.select(drag.hit,event.shiftKey);
-  }else if(drag.kind==='image'&&drag.origins){const moved=[...drag.origins.keys()];this.layerVersion++;
-   if(!this.exploration)this.run(async()=>{for(const id of moved){const image=this.images.get(id),r=this.positions.get(id);if(image&&r)await this.host.updateImage({...image,...r});}});}
+  }else if(drag.kind==='image'&&drag.origins){const moved=this.movedRecords(drag.origins.keys());this.layerVersion++;
+   if(!this.exploration&&moved.length)this.run(()=>this.host.updateImages(moved));}
   else if(drag.kind==='marquee'&&!this.inspector.hasClass('is-hidden'))this.renderInspector();
   else if(drag.kind==='handle'&&this.draft?.kind==='resize'){const resize=this.draft;this.draft=null;const region=this.regions.get(resize.regionId);
    if(region&&JSON.stringify(region.shape)!==JSON.stringify(resize.shape))this.run(()=>this.host.saveRegion({...region,shape:resize.shape}));}
   else if(drag.kind==='region'&&this.draft?.kind==='region'){const d=this.draft,r=this.positions.get(d.imageId)!;this.draft=null;const shape=this.rectangle(d.start,d.last,r);if(shape.width*r.width*this.camera.scale>4&&shape.height*r.height*this.camera.scale>4)this.createRegion(d.imageId,shape);}
   this.schedule();
  }
+ /** Every moved rectangle, read before anything is written. A write notifies, refresh()
+  * rebuilds the position map from the snapshot, and a second read would then return the
+  * stored rectangle rather than the dragged one — which moved only the first image. */
+ private movedRecords(ids:Iterable<string>):ImageRecord[]{
+  const records:ImageRecord[]=[];
+  for(const id of ids){const image=this.images.get(id),r=this.positions.get(id);if(image&&r)records.push({...image,...r,pinned:true});}
+  return records;
+ }
+ private syncModeButtons(){
+  if(this.renderedMode===this.mode)return;this.renderedMode=this.mode;
+  for(const {button,mode} of this.modeButtons){button.toggleClass('is-active',mode===this.mode);button.setAttribute('aria-pressed',String(mode===this.mode));}
+ }
  /** The images a drag on `imageId` carries: the whole selection when it is part of it. */
  private movable(imageId:string):Map<string,Rect>{
   const ids=this.selected.has(imageId)?[...this.selected]:[imageId],origins=new Map<string,Rect>();
-  for(const id of ids){const r=this.positions.get(id);if(r&&this.exploration?.root!==id)origins.set(id,copy(r));}
+  const ex=this.exploration;
+  for(const id of ids){const r=this.positions.get(id);if(r&&!ex?.isRoot(id))origins.set(id,copy(r));}
   return origins;
  }
  /** Whole-vault positions snap to the 40px grid; an explored layout is free and stays pinned. */
  private place(id:string,x:number,y:number,size:Rect){
-  this.positions.set(id,{...size,x:this.exploration?x:Math.round(x/40)*40,y:this.exploration?y:Math.round(y/40)*40});
-  if(this.exploration)this.exploration.pinned.add(id);
+  // The drag carries a delta, not a size: a pixel size read while the pointer is down
+  // changes the rectangle's width, and the drop must write the new width, not the old one.
+  const current=this.positions.get(id)??size;
+  this.positions.set(id,{width:current.width,height:current.height,x:this.exploration?x:Math.round(x/40)*40,y:this.exploration?y:Math.round(y/40)*40});
+  this.exploration?.pin(id);
  }
  /** The rectangle holding every one of `ids`, or null when none of them is placed. */
- private bounds(ids:Iterable<string>):Rect|null{
-  let left=Infinity,top=Infinity,right=-Infinity,bottom=-Infinity;
-  for(const id of ids){const r=this.positions.get(id);if(!r)continue;left=Math.min(left,r.x);top=Math.min(top,r.y);right=Math.max(right,r.x+r.width);bottom=Math.max(bottom,r.y+r.height);}
-  return Number.isFinite(left)?{x:left,y:top,width:right-left,height:bottom-top}:null;
- }
+ private bounds(ids:Iterable<string>):Rect|null{return boundsOf(this.placed(ids));}
+ private *placed(ids:Iterable<string>):Generator<Rect>{for(const id of ids){const r=this.positions.get(id);if(r)yield r;}}
  /** The grip of the selected region under `p`, if the pointer is close enough to one. */
  private grip:{regionId:string;imageId:string;handle:HandleId;origin:RegionShape}|null=null;
  private gripAt(p:Point){
   const selection=this.selection;if(selection.kind!=='region'||this.mode!=='select')return null;
-  const region=this.regions.get(selection.regionId),r=this.positions.get(selection.imageId);if(!region||!r)return null;
+  const region=this.regions.get(selection.regionId),r=this.positions.get(selection.imageId);if(!region||!r||isForeignRegion(region))return null;
   if(Math.min(r.width,r.height)*this.camera.scale<=48)return null;
   const reach=8/this.camera.scale;
   for(const grip of regionHandles(region.shape)){
@@ -547,17 +771,45 @@ export class ImageGraphView extends ItemView {
    case'delete':if(this.mode==='polygon'){this.polygon?.points.pop();this.schedule();}else this.removeSelected();return;
    case'menu':{const r=this.canvas.getBoundingClientRect();return this.menu({clientX:r.left+40,clientY:r.top+40},this.selectionHit());}
    case'help':return this.showShortcuts();
-   case'nudge':return this.nudge(command.dx,command.dy);
+   case'undo':return this.run(()=>this.host.undo());
+   case'redo':return this.run(()=>this.host.redo());
+   case'nudge':return this.mode==='move'||!this.selected.size?this.nudge(command.dx,command.dy):this.travel(command.dx,command.dy,command.far);
   }
+ }
+ /** Every shown rectangle, for a search that has no box to query. */
+ private *shownRects():Generator<readonly [string,Rect]>{
+  for(const id of this.shownIds()){const r=this.positions.get(id);if(r)yield [id,r] as const;}
+ }
+ /**
+  * Walk the selection from image to image. This is the canvas's only keyboard travel: Tab
+  * belongs to the browser, and a widget that takes it traps the person who needs it most.
+  * `far` — Shift — adds the image rather than replacing the selection.
+  */
+ private travel(dx:number,dy:number,far:boolean){
+  const from=[...this.selected].map(id=>this.positions.get(id)).filter((r):r is Rect=>!!r).at(-1);
+  if(!from)return this.nudge(dx,dy);
+  const next=neighbourInDirection(from,this.shownRects(),Math.sign(dx),Math.sign(dy));
+  if(!next){new Notice('No image that way.');return;}
+  this.setSelection(imageSelection(far?[...this.selected,next]:[next]));
+  const r=this.positions.get(next);if(r)this.bringIntoView(r);
+  this.openInspectorIfOpen();this.schedule();
+ }
+ /** Scroll just enough, and keep the zoom. Flying to each image in turn is not travel. */
+ private bringIntoView(r:Rect){
+  const s=this.camera.scale,w=this.canvas.clientWidth,h=this.canvas.clientHeight,pad=48,foot=pad+40;
+  const left=this.camera.x+r.x*s,top=this.camera.y+r.y*s,right=left+r.width*s,bottom=top+r.height*s;
+  if(left<pad)this.camera.x+=pad-left;else if(right>w-pad)this.camera.x-=right-(w-pad);
+  if(top<pad)this.camera.y+=pad-top;else if(bottom>h-foot)this.camera.y-=bottom-(h-foot);
+  this.schedule();
  }
  /** Move every selected image by one step, and write the new whole-vault positions. */
  private nudge(dx:number,dy:number){
   const origins=[...this.selected];
   // With nothing selected the arrows walk the camera, which is what a map should do.
   if(!origins.length){this.camera.x-=dx;this.camera.y-=dy;this.schedule();return;}
-  for(const id of origins){const r=this.positions.get(id);if(r&&this.exploration?.root!==id)this.place(id,r.x+dx,r.y+dy,r);}
+  for(const id of origins){const r=this.positions.get(id);if(r&&!this.exploration?.isRoot(id))this.place(id,r.x+dx,r.y+dy,r);}
   this.indexVersion++;this.layerVersion++;
-  if(!this.exploration)this.run(async()=>{for(const id of origins){const image=this.images.get(id),r=this.positions.get(id);if(image&&r)await this.host.updateImage({...image,...r});}});
+  if(!this.exploration){const moved=this.movedRecords(origins);if(moved.length)this.run(()=>this.host.updateImages(moved));}
   this.schedule();
  }
  private zoomPreset(to:'reset'|'all'|'selection'){
@@ -580,21 +832,72 @@ export class ImageGraphView extends ItemView {
   const menu=event?Menu.forEvent(event):new Menu(),item=(label:string,callback:()=>void)=>menu.addItem(i=>i.setTitle(label).onClick(callback));
   if(hit&&'endpoint'in hit){const e=hit.endpoint;item('Explore connections',()=>this.exploreImage(e.imageId));if(this.exploration){item('Expand neighbors',()=>this.expandImage(e.imageId));item(this.exploration.pinned.has(e.imageId)?'Unpin image':'Pin image',()=>this.pinImage(e.imageId));}
    item('Move image',()=>{this.select(hit);this.setMode('move');});item('Connect from here',()=>this.beginConnect(e));item('Properties',()=>this.openInspector());item('Open image',()=>this.run(()=>this.host.openImage(e.imageId)));item('Open companion note',()=>this.run(()=>this.host.openCompanion(e.imageId)));
-   if(e.regionId){item('Create image from region',()=>this.run(()=>this.host.extractRegion(e.regionId!)));item('Delete region and its connections',()=>this.run(()=>this.host.deleteRegion(e.regionId!)));}
-  }else if(hit){item('Connection properties',()=>this.openInspector());item('Delete connection',()=>this.run(()=>this.host.deleteEdge(hit.edge.id)));}
-  item('Pan / select',()=>this.setMode('select'));item('Draw rectangle region',()=>this.setMode('rect'));item('Draw polygon region',()=>this.setMode('polygon'));if(this.mode==='polygon'&&this.polygon)item('Finish polygon',()=>this.finishPolygon());
+   if(this.host.annotationAvailable())item('Annotate in Image Annotation',()=>this.run(()=>this.host.annotateInAnnotation(e.imageId)));
+   if(e.regionId){const regionId=e.regionId,region=this.regions.get(regionId);item('Create image from region',()=>this.run(()=>this.host.extractRegion(regionId)));
+    if(region&&isForeignRegion(region)){if(this.host.annotationAvailable())item('Open in Image Annotation',()=>this.run(()=>this.host.openInAnnotation(regionId)));}
+    else item('Delete region and its connections',()=>this.run(()=>this.host.deleteRegion(regionId)));}
+  }else if(hit){const name=relationOf(hit.edge.properties);if(name)item(`Explore every “${name}” connection`,()=>this.exploreRelation(name));item('Connection properties',()=>this.openInspector());item('Delete connection',()=>this.run(()=>this.host.deleteEdge(hit.edge.id)));}
+  const labels=this.host.historyLabels();menu.addSeparator();
+  if(labels.undo)item(`Undo ${labels.undo}`,()=>this.run(()=>this.host.undo()));
+  if(labels.redo)item(`Redo ${labels.redo}`,()=>this.run(()=>this.host.redo()));
+  const chosen=this.selected.size;
+  item(chosen?`Return ${chosen===1?'this image':`these ${chosen} images`} to the grid`:'Return every moved image to the grid',()=>this.run(async()=>{
+   const released=await this.host.unpinImages(chosen?[...this.selected]:undefined);
+   new Notice(released?`${released.toLocaleString()} image${released===1?'':'s'} returned to the grid.`:'No image is out of the grid.');
+  }));
+  item('Explore a relation',()=>this.exploreRelationPicker());
+  const block=this.viewBlock(hit);
+  if(block){
+   item('Copy this view as a note block',()=>this.run(async()=>{await navigator.clipboard.writeText(block);new Notice('Block copied. Paste it into any note.');}));
+   item('Add this view to a note…',()=>this.run(async()=>{const path=await this.host.insertNoteBlock(block);if(path)new Notice(`Added to ${path}.`);}));
+  }
+  item('Example connections',()=>this.run(()=>this.host.seedDemo()));
+  menu.addSeparator();item('Pan / select',()=>this.setMode('select'));item('Draw rectangle region',()=>this.setMode('rect'));item('Draw polygon region',()=>this.setMode('polygon'));if(this.mode==='polygon'&&this.polygon)item('Finish polygon',()=>this.finishPolygon());
   menu.addSeparator();this.exportMenu(menu);menu.showAtPosition({x:point.clientX,y:point.clientY});
  }
  private exportMenu(menu:Menu){const action=(label:string,visual:boolean,scope:'current'|'selected'|'whole')=>menu.addItem(i=>i.setTitle(label).onClick(()=>this.run(async()=>{const frame=this.frame(scope);if(!frame.imageIds.length)throw new Error('Select at least one image.');await(visual?this.host.exportVisual(frame,this.canvas):this.host.exportCanvas(frame));})));
   action('Save current graph as editable Canvas',false,'current');action('Save selected images as editable Canvas',false,'selected');action('Save whole vault as editable Canvas',false,'whole');action('Save viewport as visual snapshot',true,'current');}
- private removeSelected(){const s=this.selection;if(s.kind==='edge')this.run(()=>this.host.deleteEdge(s.id));else if(s.kind==='region')this.run(()=>this.host.deleteRegion(s.regionId));else new Notice('Select a region or connection to delete. Images are kept.');}
+ /**
+  * The block that would draw what is on screen. An exploration describes itself; in the vault
+  * view there is nothing to draw, so whatever is under the pointer or chosen stands in.
+  */
+ private viewBlock(hit:Hit|null):string|null{
+  const ex=this.exploration;
+  if(ex?.relation)return noteBlock({path:null,relation:ex.relation,depth:ex.depth});
+  const anchor=ex?.roots[0]??(hit&&'endpoint'in hit?hit.endpoint.imageId:[...this.selected][0]);
+  const image=anchor?this.images.get(anchor):undefined;
+  return image?noteBlock({path:image.path,relation:null,depth:ex?.depth??1}):null;
+ }
+ private removeSelected(){const s=this.selection;
+  if(s.kind==='edge')this.run(()=>this.host.deleteEdge(s.id));
+  else if(s.kind==='region')this.run(()=>this.host.deleteRegion(s.regionId));
+  else if(this.selected.size)new Notice(`Delete removes a region or a connection. ${this.selected.size===1?'That image stays':`Those ${this.selected.size} images stay`} in the vault.`,6000);
+  else new Notice('Select a region or connection to delete.');
+ }
  private openInspector(){this.inspector.removeClass('is-hidden');this.renderInspector();}
+ private toggleInspector(){if(this.inspector.hasClass('is-hidden'))this.openInspector();else{this.metadataTicket++;this.inspector.addClass('is-hidden');}}
  private renderInspector(){
   const ticket=++this.metadataTicket;for(const builder of this.propertyBuilders)builder.dispose();this.propertyBuilders=[];this.inspector.empty();const head=this.inspector.createDiv({cls:'image-graph-inspector-head'});head.createSpan({text:'Properties'});const close=head.createEl('button',{text:'×',attr:{'aria-label':'Close properties'}});close.onclick=()=>{this.metadataTicket++;this.inspector.addClass('is-hidden');};
   const edge=this.snapshot.edges.find(e=>e.id===this.selectedEdge);if(edge){this.inspector.createEl('p',{text:`${this.describe(edge.source)} → ${this.describe(edge.target)}`});this.inspector.createEl('label',{text:'Arrow direction'});const select=this.inspector.createEl('select');for(const [value,text]of [['none','None'],['forward','Source → target'],['reverse','Source ← target'],['both','Both directions']])select.createEl('option',{attr:{value},text});select.value=edge.direction;this.inspector.createEl('p',{text:'Describe the connection in relation, for example “resembles”. This text appears beside the line.'});this.propertyEditor('Connection details',edge.properties,async props=>{if(!relationOf(props))throw new Error('Describe the connection in relation, as text, for example “resembles”.');await this.host.saveEdge({...edge,direction:select.value as Direction,properties:props});});return;}
-  const region=this.selectedRegion?this.regions.get(this.selectedRegion):undefined;if(region){this.inspector.createEl('label',{text:'Region label'});const label=this.inspector.createEl('input');label.value=region.label;const geometry=this.inspector.createEl('details');geometry.createEl('summary',{text:'Region geometry'});const shape=this.geometryEditor(geometry,region.shape);this.propertyEditor('Region properties',region.properties,async props=>{await this.host.saveRegion({...region,label:label.value,shape:shape.getShape(),properties:props});});return;}
-  const imageId=[...this.selected][0],image=imageId?this.images.get(imageId):undefined;if(!image){this.inspector.createEl('p',{text:'Select an image, region, or connection.'});return;}this.inspector.createEl('p',{text:image.path});const open=this.inspector.createEl('button',{text:'Open companion note'});open.onclick=()=>this.run(()=>this.host.openCompanion(imageId));
+  const region=this.selectedRegion?this.regions.get(this.selectedRegion):undefined;
+  if(region&&isForeignRegion(region)){this.foreignInspector(region);return;}
+  if(region){this.inspector.createEl('label',{text:'Region label'});const label=this.inspector.createEl('input');label.value=region.label;const geometry=this.inspector.createEl('details');geometry.createEl('summary',{text:'Region geometry'});const shape=this.geometryEditor(geometry,region.shape);this.propertyEditor('Region properties',region.properties,async props=>{await this.host.saveRegion({...region,label:label.value,shape:shape.getShape(),properties:props});});return;}
+  const imageId=[...this.selected][0],image=imageId?this.images.get(imageId):undefined;if(!image){this.inspector.createEl('p',{cls:'image-graph-empty-inspector',text:'Select an image, region, or connection.'});return;}
+  // One image is edited at a time. Say which, rather than let a selection of forty look like one.
+  if(this.selected.size>1)this.inspector.createEl('p',{cls:'image-graph-inspector-title',text:`${this.selected.size} images selected · editing one of them`});
+  this.inspector.createEl('p',{text:image.path});const open=this.inspector.createEl('button',{text:'Open companion note'});open.onclick=()=>this.run(()=>this.host.openCompanion(imageId));
   const loading=this.inspector.createEl('p',{text:'Loading properties…'});this.run(async()=>{const props=await this.host.readMetadata(imageId);if(!this.active||ticket!==this.metadataTicket)return;loading.remove();this.propertyEditor('Image details and tags',props,p=>this.host.saveMetadata(imageId,p));});
+ }
+ /** A region Image Annotation drew: its name, where it was attached, and the way back. Nothing here edits. */
+ private foreignInspector(region:RegionRecord){
+  this.inspector.createEl('p',{cls:'image-graph-inspector-title',text:`${region.label} · drawn in Image Annotation`});
+  const actions=this.inspector.createDiv({cls:'image-graph-inspector-actions'});
+  if(this.host.annotationAvailable()){const open=actions.createEl('button',{text:'Open in Image Annotation'});open.onclick=()=>this.run(()=>this.host.openInAnnotation(region.id));}
+  const extract=actions.createEl('button',{text:'Create image from region'});extract.onclick=()=>this.run(()=>this.host.extractRegion(region.id));
+  const attachments=this.host.regionAttachments(region.id);
+  this.inspector.createEl('h4',{text:attachments.length?'Attached to':'Not attached to any note'});
+  for(const attachment of attachments){const note=attachment.notePath.replace(/\.md$/,'');const b=this.inspector.createEl('button',{cls:'image-graph-attachment',text:attachment.blockId?`${note} · paragraph`:note});b.onclick=()=>this.run(()=>this.host.openAttachment(attachment));}
+  this.inspector.createEl('p',{cls:'image-graph-property-help',text:'Edit or delete this region in Image Annotation. Connections you draw to it stay here.'});
  }
  /** Named fields for the one structured value an owner edits by hand, parsed rather than cast. */
  private geometryEditor(parent:HTMLElement,shape:RegionShape):{getShape:()=>RegionShape}{
@@ -633,17 +936,60 @@ export class ImageGraphView extends ItemView {
  }
 
  focusImage(imageId:string){const r=this.positions.get(imageId)??this.images.get(imageId);if(!r)return;this.setSelection(imageSelection([imageId]));const scale=Math.min(1.8,(this.canvas.clientWidth-80)/r.width,(this.canvas.clientHeight-100)/r.height);this.camera={scale:Math.max(.01,scale),x:this.canvas.clientWidth/2-(r.x+r.width/2)*scale,y:this.canvas.clientHeight/2-(r.y+r.height/2)*scale};this.schedule();}
- revealExtracted(imageId:string,parentImageId:string){this.refresh();if(this.exploration){this.exploration.expanded.add(parentImageId);this.rebuild(false);}this.focusImage(imageId);}
- private exploreSelection(){const id=[...this.selected][0];if(id)this.exploreImage(id);else new Notice('Select an image, or create example connections.');}
- exploreImage(imageId:string){if(!this.images.has(imageId))return;this.cancel();const savedCamera=this.exploration?.savedCamera??{...this.camera};this.exploration={root:imageId,depth:1,filter:'',expanded:new Set(),pinned:new Set(),graph:neighborhood(this.snapshot,imageId,1,new Set(),'',150),positions:new Map(),savedCamera};this.setSelection(imageSelection([imageId]));this.depthSelect.value='1';this.relationSelect.value='';this.rebuild(true);}
- setDepth(depth:number){if(!this.exploration)return;this.exploration.depth=clamp(Math.floor(depth),1,3);this.depthSelect.value=String(this.exploration.depth);this.exploration.expanded.clear();this.rebuild(true);}
- setRelationFilter(value:string){if(!this.exploration)return;this.exploration.filter=value;this.relationSelect.value=value;this.schedule();}
- expandImage(imageId:string){if(!this.exploration){this.exploreImage(imageId);return;}this.exploration.expanded.add(imageId);this.rebuild(true);}
- pinImage(imageId:string){const ex=this.exploration;if(!ex||imageId===ex.root)return;if(ex.pinned.has(imageId))ex.pinned.delete(imageId);else ex.pinned.add(imageId);this.schedule();}
- private rebuild(refit:boolean){const ex=this.exploration;if(!ex)return;ex.graph=neighborhood(this.snapshot,ex.root,ex.depth,ex.expanded,'',150);ex.positions=forceLayout(this.snapshot.images,ex.graph,ex.root,ex.pinned,ex.positions);this.indexVersion++;this.pruneSelection(id=>ex.positions.has(id));if(refit)this.fit();this.schedule();}
+ revealExtracted(imageId:string,parentImageId:string){this.refresh();if(this.exploration){this.exploration.expand(parentImageId);this.rebuild(false);}this.focusImage(imageId);}
+ /** Explore whatever is chosen. A connection is a thing a person pointed at, so it means the
+  * two pictures it joins — `Explore every “…” connection` is the relation, and it says so. */
+ private exploreSelection(){
+  const selection=this.selection;
+  if(selection.kind==='edge'){
+   const edge=this.snapshot.edges.find(e=>e.id===selection.id);
+   if(edge)return this.exploreImages([...new Set([edge.source.imageId,edge.target.imageId])]);
+  }
+  const id=[...this.selected][0];
+  if(id)this.exploreImage(id);
+  else new Notice('Choose an image to explore its connections, or use the arrow beside the button to choose a relation.',7000);
+ }
+ exploreImage(imageId:string){this.exploreImages([imageId]);}
+ /** One picture, or the two a connection joins. */
+ exploreImages(imageIds:readonly string[]){
+  const next=Exploration.fromImages(this.snapshot,imageIds,this.exploration?.savedCamera??{...this.camera});
+  if(!next)return;
+  this.cancel();
+  this.exploration=next;
+  this.setSelection(imageSelection(next.roots));this.depthSelect.value='1';this.relationSelect.value='';this.rebuild(true);
+ }
+ /** Everything one relation joins, as a graph. There is no starting image and no hop count:
+  * a relation is a shape the whole vault has, not a view from one picture. */
+ exploreRelation(relation:string){
+  if(!relation)return;
+  const next=Exploration.fromRelation(this.snapshot,relation,this.exploration?.savedCamera??{...this.camera});
+  if(!next){new Notice(`Nothing is connected by “${relation}”.`);return;}
+  this.cancel();
+  this.exploration=next;
+  this.setSelection(NOTHING);this.relationSelect.value=relation;
+  this.rebuild(true);
+ }
+ /** Explore whatever is chosen: an image, the relation of a chosen connection, or a relation
+  * picked from a list when nothing is chosen at all. */
+ exploreRelationPicker(){
+  const names=relationNames(this.snapshot);
+  if(!names.length){new Notice('No connection carries a relation yet.');return;}
+  new RelationPicker(this.app,names,this.snapshot,name=>this.exploreRelation(name)).open();
+ }
+ setDepth(depth:number){const ex=this.exploration;if(!ex)return;ex.setDepth(depth);this.depthSelect.value=String(ex.depth);this.rebuild(true);}
+ setRelationFilter(value:string){
+  const ex=this.exploration;if(!ex)return;
+  // Exploring a relation, the list picks which relation. Exploring an image, it dims the rest.
+  if(ex.relation!==null){if(value)this.exploreRelation(value);else this.exitExploration();return;}
+  ex.filter=value;this.relationSelect.value=value;this.schedule();
+ }
+ expandImage(imageId:string){const ex=this.exploration;if(!ex){this.exploreImage(imageId);return;}ex.expand(imageId);this.rebuild(true);}
+ pinImage(imageId:string){const ex=this.exploration;if(!ex||ex.isRoot(imageId))return;ex.togglePin(imageId);this.schedule();}
+ private rebuild(refit:boolean){const ex=this.exploration;if(!ex)return;
+  ex.rebuild(this.snapshot);this.indexVersion++;this.pruneSelection(id=>ex.positions.has(id));if(refit)this.fit();this.schedule();}
  exitExploration(){const ex=this.exploration;if(!ex)return;this.camera={...ex.savedCamera};this.exploration=null;this.setSelection(keepImages(this.selection));this.cancel();this.schedule();}
  private fit(box?:Rect|null){
-  const root=!box&&this.exploration?this.positions.get(this.exploration.root):null;
+  const anchor=this.exploration?.anchor??null;const root=!box&&anchor?this.positions.get(anchor):null;
   box=box??this.bounds(this.positions.keys());
   if(!box)return;
   const w=this.canvas.clientWidth||800,h=this.canvas.clientHeight||600;
@@ -657,5 +1003,5 @@ export class ImageGraphView extends ItemView {
   this.camera={scale,x:w/2-(box.x+box.width/2)*scale,y:(h-35)/2-(box.y+box.height/2)*scale};this.schedule();
  }
  frame(scope:'current'|'selected'|'whole'='current'):ViewFrame{const imageIds=scope==='whole'?this.snapshot.images.map(i=>i.id):scope==='selected'?[...this.selected]:[...this.shownIds()],ids=new Set(imageIds),positions:Record<string,Rect>={};for(const imageId of imageIds){const r=scope==='whole'?this.wholePositions.get(imageId):this.positions.get(imageId);if(r)positions[imageId]=copy(r);}const edgeIds=(scope==='whole'?this.snapshot.edges:this.shownEdges()).filter(e=>ids.has(e.source.imageId)&&ids.has(e.target.imageId)).map(e=>e.id);return{imageIds,edgeIds,positions,camera:{...this.camera},width:this.canvas.clientWidth,height:this.canvas.clientHeight};}
- debugState(){return{camera:{...this.camera},selection:this.selection.kind,selected:[...this.selected],selectedRegion:this.selectedRegion,selectedEdge:this.selectedEdge,mode:this.mode,draft:this.draft?.kind??null,pending:this.pending,imageCount:this.images.size,stats:{...this.stats},exploration:this.exploration?{rootId:this.exploration.root,depth:this.exploration.depth,ids:this.exploration.graph.ids,pinned:[...this.exploration.pinned],capped:this.exploration.graph.capped}:null,frame:this.frame()};}
+ debugState(){return{camera:{...this.camera},selection:this.selection.kind,selected:[...this.selected],selectedRegion:this.selectedRegion,selectedEdge:this.selectedEdge,mode:this.mode,draft:this.draft?.kind??null,pending:this.pending,imageCount:this.images.size,stats:{...this.stats},exploration:this.exploration?{roots:[...this.exploration.roots],relation:this.exploration.relation,depth:this.exploration.depth,ids:this.exploration.graph.ids,pinned:[...this.exploration.pinned],capped:this.exploration.graph.capped}:null,frame:this.frame()};}
 }

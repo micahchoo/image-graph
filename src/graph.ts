@@ -1,5 +1,5 @@
-import {parseYaml} from 'obsidian';
-import type {EdgeRecord, Endpoint, ImageRecord, Point, Properties, Rect, RegionRecord, RegionShape} from './types';
+import type {EdgeRecord, Endpoint, ImageRecord, Point, Rect, RegionRecord, RegionShape} from './types';
+import {exploreSize} from './layout';
 
 export interface Neighborhood {
  ids: string[];
@@ -15,7 +15,22 @@ function endpoints(edge: EdgeRecord): string[] {
 }
 
 /** Breadth-first image traversal. Edge direction is deliberately ignored for exploration. */
-export function neighborhood(snapshot: {images: ImageRecord[]; edges: EdgeRecord[]}, rootId: string, depth: number, expanded: Set<string>, relationFilter: string, limit = Number.POSITIVE_INFINITY): Neighborhood {
+export function neighborhood(snapshot: {images: ImageRecord[]; edges: EdgeRecord[]}, rootId: string, depth: number, expanded: Set<string>, limit = Number.POSITIVE_INFINITY): Neighborhood {
+ return neighborhoodFrom(snapshot, [rootId], depth, expanded, limit);
+}
+
+/**
+ * The same traversal from several starting images at once.
+ *
+ * Choosing a connection means choosing the two pictures it joins — a line drawn across the
+ * whole vault is a thing a person points at, and what they want is both of its ends in
+ * context, not every other line that shares its relation.
+ *
+ * No relation filter: a relation is shown by dimming the others (`presentation.ts`), and a
+ * traversal that dropped them would drop the context the dimming needs. One relation on its
+ * own is `relationNeighborhood`.
+ */
+export function neighborhoodFrom(snapshot: {images: ImageRecord[]; edges: EdgeRecord[]}, rootIds: readonly string[], depth: number, expanded: Set<string>, limit = Number.POSITIVE_INFINITY): Neighborhood {
  const maxDepth = Math.max(0, Math.floor(depth));
  const ids: string[] = [];
  const distances = new Map<string, number>();
@@ -23,15 +38,15 @@ export function neighborhood(snapshot: {images: ImageRecord[]; edges: EdgeRecord
  const edgesByImage = new Map<string, EdgeRecord[]>();
  const imageIds = new Set(snapshot.images.map((image) => image.id));
  for (const edge of snapshot.edges) {
-  if (relationFilter !== '' && (relationOf(edge.properties) ?? '') !== relationFilter) continue;
   const [a, b] = endpoints(edge);
   if (!imageIds.has(a) || !imageIds.has(b)) continue;
   (edgesByImage.get(a) ?? (edgesByImage.set(a, []), edgesByImage.get(a)!)).push(edge);
   if (b !== a) (edgesByImage.get(b) ?? (edgesByImage.set(b, []), edgesByImage.get(b)!)).push(edge);
  }
- if (!imageIds.has(rootId)) return {ids, edges: [], distances, parents, capped: false};
- const queue: string[] = [rootId];
- distances.set(rootId, 0); ids.push(rootId);
+ const roots = rootIds.filter((id) => imageIds.has(id));
+ if (!roots.length) return {ids, edges: [], distances, parents, capped: false};
+ const queue: string[] = [];
+ for (const id of roots) if (!distances.has(id)) { distances.set(id, 0); ids.push(id); queue.push(id); }
  let capped = false;
  while (queue.length) {
   const current = queue.shift()!;
@@ -48,8 +63,40 @@ export function neighborhood(snapshot: {images: ImageRecord[]; edges: EdgeRecord
   }
  }
  const included = new Set(ids);
- const resultEdges = snapshot.edges.filter((edge) => included.has(edge.source.imageId) && included.has(edge.target.imageId) && (relationFilter === '' || (relationOf(edge.properties) ?? '') === relationFilter));
+ const resultEdges = snapshot.edges.filter((edge) => included.has(edge.source.imageId) && included.has(edge.target.imageId));
  return {ids, edges: resultEdges, distances, parents, capped};
+}
+
+/**
+ * Every image an edge of this relation touches, and those edges.
+ *
+ * A relation has no root. It is a subgraph of the whole vault rather than the neighbourhood of
+ * one picture, so there are no hops to count and nothing to anchor: `distances` is 0 for every
+ * image and `parents` is empty, which is what tells `forceLayout` to lay it out as a graph.
+ */
+export function relationNeighborhood(snapshot: {images: ImageRecord[]; edges: EdgeRecord[]}, relation: string, limit = Number.POSITIVE_INFINITY): Neighborhood {
+ const imageIds = new Set(snapshot.images.map((image) => image.id));
+ const ids: string[] = [];
+ const distances = new Map<string, number>();
+ let capped = false;
+ for (const edge of snapshot.edges) {
+  if ((relationOf(edge.properties) ?? '') !== relation) continue;
+  const [a, b] = endpoints(edge);
+  if (!imageIds.has(a) || !imageIds.has(b)) continue;
+  for (const id of a === b ? [a] : [a, b]) {
+   if (distances.has(id)) continue;
+   if (ids.length >= limit) { capped = true; continue; }
+   distances.set(id, 0); ids.push(id);
+  }
+ }
+ const included = new Set(ids);
+ const edges = snapshot.edges.filter((edge) => (relationOf(edge.properties) ?? '') === relation && included.has(edge.source.imageId) && included.has(edge.target.imageId));
+ return {ids, edges, distances, parents: new Map(), capped};
+}
+
+/** Every relation the vault uses, in the order a list should show them. */
+export function relationNames(snapshot: {edges: EdgeRecord[]}): string[] {
+ return [...new Set(snapshot.edges.map((edge) => relationOf(edge.properties) ?? '').filter(Boolean))].sort();
 }
 
 export function tracePath(rootId: string, targetId: string, neighborhood: Neighborhood): Array<{from: string; to: string; edge: EdgeRecord}> {
@@ -90,18 +137,21 @@ export const hopRadii = (hop: number, count = 1, maxCard = 100): number => {
  * dense is unreadable whatever the routing. Measured in docs/PERFORMANCE.md. */
 const CLEARANCE_BUDGET = 24000;
 
-export function forceLayout(images: ImageRecord[], graph: Neighborhood, rootId: string, pinned: Set<string>, previous: Map<string, Rect>): Map<string, Rect> {
+export function forceLayout(images: ImageRecord[], graph: Neighborhood, rootId: string | null, pinned: Set<string>, previous: Map<string, Rect>): Map<string, Rect> {
  const byId = new Map(images.map((image) => [image.id, image]));
  const positions = new Map<string, Rect>();
  for (const id of graph.ids) {
   const image = byId.get(id);
   if (!image) continue;
   const old = previous.get(id);
-  positions.set(id, old ? {...old} : {...image, x: seeded(id).x, y: seeded(id).y});
+  // Explored thumbnails are contained rather than height-constrained: a tall picture and a
+  // wide one are both wholly visible, and neither costs the ring a whole row of width.
+  const fit = exploreSize(image);
+  positions.set(id, old ? {...old, ...fit} : {...image, ...fit, x: seeded(id).x, y: seeded(id).y});
  }
  // New nodes start on a stable ring around the root. This avoids the large,
  // biased seed cloud that otherwise takes many iterations to untangle.
- const initialRoot = positions.get(rootId);
+ const initialRoot = rootId === null ? undefined : positions.get(rootId);
  const maxCard = graph.ids.reduce((size, id) => {
   const image = positions.get(id); return image ? Math.max(size, image.width, image.height) : size;
  }, 100);
@@ -111,7 +161,7 @@ export function forceLayout(images: ImageRecord[], graph: Neighborhood, rootId: 
   const ring=rings.get(hop)??[];ring.push(id);rings.set(hop,ring);
  }
  const ringCapacity = Math.max(1,...[...rings.values()].map(ids=>ids.length));
- if (initialRoot) for(const [hop,ids] of [...rings.entries()].sort((a,b)=>a[0]-b[0])){
+ if (initialRoot && rootId !== null) for(const [hop,ids] of [...rings.entries()].sort((a,b)=>a[0]-b[0])){
   const phase=seededAngle(rootId);
   const parentAngle=(id:string)=>{const parent=positions.get(graph.parents.get(id)?.imageId??rootId)!;return (Math.atan2(parent.y-initialRoot.y,parent.x-initialRoot.x)-phase+Math.PI*4)%(Math.PI*2);};
   ids.sort((a,b)=>parentAngle(a)-parentAngle(b)||a.localeCompare(b));
@@ -125,9 +175,22 @@ export function forceLayout(images: ImageRecord[], graph: Neighborhood, rootId: 
    p.y=initialRoot.y+Math.sin(angle)*radius;
   });
  }
+ /* No root: one deterministic ring beats the seeded cloud, which the comment above says takes
+  * many iterations to untangle. The force pass then does the whole job, as it did before the
+  * hop rings existed. */
+ if (!initialRoot) {
+  const loose = graph.ids.filter((id) => !pinned.has(id) && !previous.has(id));
+  const radius = Math.max(420, loose.length * Math.max(192, maxCard + 96) / (Math.PI * 2));
+  const phase = seededAngle(graph.ids[0] ?? '');
+  loose.forEach((id, slot) => {
+   const p = positions.get(id)!;
+   const angle = phase + (slot + .5) / loose.length * Math.PI * 2;
+   p.x = Math.cos(angle) * radius; p.y = Math.sin(angle) * radius;
+  });
+ }
  const movable = graph.ids.filter((id) => !pinned.has(id));
  const edgePairs = graph.edges.map((edge) => [edge.source.imageId, edge.target.imageId] as const).filter(([a, b]) => positions.has(a) && positions.has(b));
- const rootPosition = positions.get(rootId);
+ const rootPosition = rootId === null ? undefined : positions.get(rootId);
  const rootAnchor = rootPosition ? {x: rootPosition.x, y: rootPosition.y} : {x: 0, y: 0};
  for (let iteration = 0; iteration < 150; iteration++) {
   const force = new Map<string, Point>();
@@ -182,7 +245,7 @@ export function forceLayout(images: ImageRecord[], graph: Neighborhood, rootId: 
   // Keep each hop on a soft radial ring around the root. This makes a
   // 1/2/3-hop exploration readable while allowing overlap and edge forces to
   // settle the exact position.
-  const root = positions.get(rootId);
+  const root = rootId === null ? undefined : positions.get(rootId);
   if (root) for (const id of movable) {
    if (id === rootId) continue;
    const p = positions.get(id)!;
@@ -209,7 +272,7 @@ export function forceLayout(images: ImageRecord[], graph: Neighborhood, rootId: 
  return positions;
 }
 
-export function endpointPosition(endpoint: Endpoint, images: Map<string, Rect>, regions: Map<string, RegionRecord>): Point {
+export function endpointPosition(endpoint: Endpoint, images: ReadonlyMap<string, Rect>, regions: ReadonlyMap<string, RegionRecord>): Point {
  const image = images.get(endpoint.imageId); if (!image) return {x: 0, y: 0};
  const region = endpoint.regionId ? regions.get(endpoint.regionId) : undefined;
  if (!region || region.imageId !== endpoint.imageId) return {x: image.x + image.width / 2, y: image.y + image.height / 2};
@@ -249,7 +312,7 @@ function clipToPolygon(center: Point, toward: Point, points: Point[]): Point | u
  return hit;
 }
 
-function endpointBoundary(endpoint: Endpoint, toward: Point, images: Map<string, Rect>, regions: Map<string, RegionRecord>): Point {
+function endpointBoundary(endpoint: Endpoint, toward: Point, images: ReadonlyMap<string, Rect>, regions: ReadonlyMap<string, RegionRecord>): Point {
  const image = images.get(endpoint.imageId);
  const center = endpointPosition(endpoint, images, regions);
  if (!image) return center;
@@ -264,7 +327,7 @@ function endpointBoundary(endpoint: Endpoint, toward: Point, images: Map<string,
 }
 
 /** Return edge attachment points on image/region boundaries rather than centers. */
-export function edgeEndpoints(edge: EdgeRecord, images: Map<string, Rect>, regions: Map<string, RegionRecord>): {source: Point; target: Point} {
+export function edgeEndpoints(edge: EdgeRecord, images: ReadonlyMap<string, Rect>, regions: ReadonlyMap<string, RegionRecord>): {source: Point; target: Point} {
  const sourceCenter = endpointPosition(edge.source, images, regions);
  const targetCenter = endpointPosition(edge.target, images, regions);
  return {source: endpointBoundary(edge.source, targetCenter, images, regions), target: endpointBoundary(edge.target, sourceCenter, images, regions)};
@@ -351,23 +414,4 @@ export function containsRegion(point: Point, shape: RegionShape): boolean {
   if ((a.y > point.y) !== (b.y > point.y) && point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
  }
  return inside;
-}
-
-function safeValue(value: unknown): unknown {
- if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
- if (typeof value === 'number') { if (!Number.isFinite(value)) throw new Error('Invalid metadata number'); return value; }
- if (Array.isArray(value)) return value.map(safeValue);
- if (typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
-  const result: Record<string, unknown> = {};
-  for (const [key, item] of Object.entries(value)) { if (key === '__proto__' || key === 'constructor' || key === 'prototype') throw new Error('Unsafe metadata key'); result[key] = safeValue(item); }
-  return result;
- }
- throw new Error('Invalid metadata value');
-}
-
-export function parseProperties(text: string): Properties {
- let value: unknown;
- try { value = parseYaml(text); } catch (error) { throw new Error(`Invalid YAML metadata: ${error instanceof Error ? error.message : String(error)}`); }
- if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new Error('Metadata must be a mapping');
- return safeValue(value) as Properties;
 }

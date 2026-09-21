@@ -8,6 +8,34 @@ import type {Point, Rect} from './types';
  * hit-tests in the same order as a full scan of the id list. */
 const TARGET_PER_CELL=4, MAX_CELLS_PER_RECT=64;
 
+/**
+ * The image a person means when they press an arrow.
+ *
+ * An arrow points at a cone, not at a half-plane: something far to the side and barely ahead
+ * is to the side, whatever the straight-line distance says. A candidate qualifies when it
+ * lines up across the arrow — its extent overlaps the source's on the other axis — or when it
+ * is further ahead than it is aside. Lined-up candidates win, which is what makes a grid feel
+ * like rows and columns rather than a scatter of points.
+ */
+export function neighbourInDirection(from:Rect,candidates:Iterable<readonly [string,Rect]>,dx:number,dy:number):string|null{
+ const centreX=from.x+from.width/2,centreY=from.y+from.height/2;
+ const nearFrom=dx?from.y:from.x,farFrom=dx?from.y+from.height:from.x+from.width;
+ let best:string|null=null,bestScore=Number.POSITIVE_INFINITY,bestAligned=false;
+ for(const [id,rect] of candidates){
+  const x=rect.x+rect.width/2-centreX,y=rect.y+rect.height/2-centreY;
+  const forward=dx?x*dx:y*dy,lateral=Math.abs(dx?y:x);
+  if(forward<=0.5)continue;
+  const nearTo=dx?rect.y:rect.x,farTo=dx?rect.y+rect.height:rect.x+rect.width;
+  const aligned=nearTo<farFrom&&nearFrom<farTo;
+  if(!aligned&&lateral>forward)continue;
+  if(best!==null&&bestAligned&&!aligned)continue;
+  const score=forward+lateral*2;
+  const better=best===null||(aligned&&!bestAligned)||score<bestScore||(score===bestScore&&id<best);
+  if(better){best=id;bestScore=score;bestAligned=aligned;}
+ }
+ return best;
+}
+
 export class SpatialIndex {
  private readonly ids:readonly string[];
  private readonly rects:readonly Rect[];

@@ -34,6 +34,9 @@
 .image-graph-canvas[data-mode="connect"]{cursor:copy}
 .image-graph-canvas[data-mode="zoom-in"]{cursor:zoom-in}
 .image-graph-canvas[data-mode="zoom-out"]{cursor:zoom-out}
+/* What the pointer is over outranks the mode: the cursor is the only warning before a click. */
+.image-graph-canvas[data-over="target"]{cursor:pointer}
+.image-graph-canvas[data-over="grip"]{cursor:nwse-resize}
 .image-graph-drawing-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;background:var(--background-secondary);font-size:var(--font-ui-small)}
 .image-graph-drawing-controls.is-hidden{display:none}
 .image-graph-inspector{width:min(390px,calc(100% - 24px))}
@@ -60,3 +63,8 @@
 .image-graph-property-problem{grid-column:1/-1;font-size:var(--font-smaller);color:var(--text-error)}
 .image-graph-property-problem.is-hidden{display:none}
 .image-graph-inspector input[aria-invalid="true"],.image-graph-inspector select[aria-invalid="true"]{border-color:var(--text-error)}
+
+.image-graph-shortcuts table{width:100%;border-collapse:collapse}
+.image-graph-shortcuts td{padding:2px 8px 2px 0;vertical-align:top;font:var(--font-ui-small)}
+.image-graph-shortcuts td:first-child{white-space:nowrap;width:1%}
+.image-graph-shortcuts h4{margin:12px 0 4px}

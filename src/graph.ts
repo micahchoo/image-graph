@@ -257,6 +257,36 @@ export function parseRegionShape(value: unknown): RegionShape {
  throw new Error('Choose either a rectangle or a polygon.');
 }
 
+/** A grip on a region outline. A rectangle offers eight; a polygon offers one per corner,
+ * addressed by its index. Penpot splits these into resize-point and resize-side handlers;
+ * one list is enough here because every grip does the same thing. */
+export type HandleId = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | number;
+export interface Handle {id: HandleId; x: number; y: number}
+const GRIPS: Array<[Exclude<HandleId, number>, number, number]> = [['nw', 0, 0], ['n', .5, 0], ['ne', 1, 0], ['e', 1, .5], ['se', 1, 1], ['s', .5, 1], ['sw', 0, 1], ['w', 0, .5]];
+/** Below this a region would be too small to grip again. */
+const MIN_SIDE = .004;
+const inside = (value: number) => Math.max(0, Math.min(1, value));
+
+/** Grip positions as fractions of the image, in the same space as the shape itself. */
+export function regionHandles(shape: RegionShape): Handle[] {
+ if (shape.type === 'rect') return GRIPS.map(([id, fx, fy]) => ({id, x: shape.x + shape.width * fx, y: shape.y + shape.height * fy}));
+ return shape.points.map((point, index) => ({id: index, x: point.x, y: point.y}));
+}
+
+/** Put one grip at `point` and keep the shape legal: inside the image, never inverted, never
+ * too small to grip. Always applied to the shape as it was when the drag started, so a side
+ * that hits the minimum and comes back lands where the pointer is. */
+export function resizeRegion(shape: RegionShape, handle: HandleId, point: Point): RegionShape {
+ const x = inside(point.x), y = inside(point.y);
+ if (shape.type === 'polygon') return parseRegionShape({type: 'polygon', points: shape.points.map((corner, index) => index === handle ? {x, y} : corner)});
+ if (typeof handle === 'number') return shape;
+ let left = shape.x, right = shape.x + shape.width, top = shape.y, bottom = shape.y + shape.height;
+ if (handle.includes('w')) left = x; else if (handle.includes('e')) right = x;
+ if (handle.startsWith('n')) top = y; else if (handle.startsWith('s')) bottom = y;
+ const width = Math.max(MIN_SIDE, Math.abs(right - left)), height = Math.max(MIN_SIDE, Math.abs(bottom - top));
+ return parseRegionShape({type: 'rect', x: Math.min(Math.min(left, right), 1 - width), y: Math.min(Math.min(top, bottom), 1 - height), width, height});
+}
+
 export function containsRegion(point: Point, shape: RegionShape): boolean {
  if (shape.type === 'rect') return point.x >= shape.x && point.x <= shape.x + shape.width && point.y >= shape.y && point.y <= shape.y + shape.height;
  let inside = false;

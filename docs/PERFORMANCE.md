@@ -132,6 +132,44 @@ copies. Cold start is about 177 ms before the first frame: `refreshCatalog()`
 53 ms, `store.load()` 123 ms. Both are linear in vault size and neither is
 user-visible at this size.
 
-Region drawing iterates every region rather than the regions of visible images,
-and `endpointAt` scans every shown image on each pointer press. Both measure
-under 2 ms here and both grow with the collection, not the viewport.
+Making zoom smooth is still the largest remaining gap.
+
+## The spatial index
+
+Measured 2026-09-20, same vault and canvas. `src/spatial.ts` buckets the shown
+rectangles into a uniform grid — Penpot's `TileHashMap` in
+`render-wasm/src/tiles.rs` is the same idea — and four loops now ask the
+viewport instead of the vault: the visibility pre-pass, the tile-layer build,
+region drawing, and `endpointAt`. The grid is rebuilt when the layout changes,
+not per frame: 1 ms for 20,005 rectangles.
+
+| Workload | Before the index | After |
+| --- | --- | --- |
+| Draw call, whole vault, while panning | 1.0 ms | 0.7 ms |
+| Draw call, scale 0.01, while panning | 2.5 ms | 0.6 ms |
+| Cold layer build, whole vault | 100 ms | 35.8 ms |
+| `endpointAt`, 20,005 images on screen | 0.5 ms per press | 0.0004 ms |
+| Band selection across the whole vault | — | 0.0005 ms |
+
+**The first version of the index was slower than no index at all.** Panning the
+whole vault went from 1.0 ms to 21.6 ms, because a window holding every image
+collected 20,005 ordinals, sorted them back into paint order, and allocated an
+id array — every frame. A linear scan had done none of that. The fix is two
+paths: a window that covers the whole layout returns the id list itself, and a
+window reaching into most of the grid runs one pass over every rectangle, which
+is already in paint order and needs no sort. Only a genuinely small window walks
+buckets. This is why the index is measured against a full scan in
+`tests/spatial.test.ts` at each of the three paths.
+
+## Hover
+
+Hover is new, and it is the only work added to the pointer path. `hit()` rejects
+each connection by its bounding box before resolving endpoints and measuring
+distance, which costs 0.0008 ms per call at the whole-vault view with the real
+33 connections, and **0.39 ms with 20,000 synthetic ones**.
+
+A pointer can report far more moves than there are frames, so that cost is not
+paid per move: `pointerMove` records the client position and the hit test runs
+once inside `draw()`, skipped entirely when the position, the camera and the
+mode are all unchanged. A press does not trust it — `pointerDown` re-reads the
+grip and the hit, because a fast pointer can arrive between frames.

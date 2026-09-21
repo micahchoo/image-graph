@@ -1,3 +1,25 @@
+# Unreleased
+
+Canvas interaction, after a study of Penpot's workspace.
+
+- One selection replaces three fields that were kept in step by hand. Two states
+  the old model could reach are now unrepresentable: an image ringed while a
+  connection was edited, and a region edited while its image was deselected.
+- The wheel scrolls the canvas and `Ctrl` or `⌘` with the wheel zooms, which is
+  what Obsidian's own canvas does. **A plain scroll no longer zooms.** A
+  trackpad can now pan, which it could not before.
+- The pointer names what it is over before you press: a ring on the image or
+  region under it, a thicker connection, and a cursor that says which.
+- Shift-drag selects every image the band touches. Dragging one image of a
+  selection carries all of them. Arrow keys move the selection one grid step,
+  five with `Shift`.
+- A selected region carries grips. Dragging one resizes it; before this a region
+  could only be redrawn or typed as numbers.
+- `?` lists every shortcut. `Shift` with `0`, `1` or `2` zooms to 100%, to
+  everything, or to the selection.
+- A spatial index backs the renderer and the hit test, so both cost the viewport
+  rather than the vault. See [performance](PERFORMANCE.md).
+
 # 0.1.0
 
 First release.

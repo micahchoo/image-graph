@@ -32,6 +32,20 @@ Export module src/export.ts exports GraphExporter:
 - canvas(snapshot: GraphSnapshot, frame: ViewFrame): Promise<TFile>
 - visual(snapshot: GraphSnapshot, frame: ViewFrame, source?: HTMLCanvasElement): Promise<TFile>
 
+Selection module src/selection.ts exports Selection and its transitions:
+- Selection = none | images | region | edge. A region carries its image; an edge carries none.
+- selectTarget/prune/keepImages/imageSelection/selectedImages are pure; the view holds one Selection and one cached image set.
+- Never add a second selection field. The two defects this replaced were both a disagreement between parallel fields.
+
+Spatial module src/spatial.ts exports SpatialIndex(order, positions):
+- query(rect) and at(point) answer in paint order; the renderer, region drawing and endpointAt all read it.
+- Three paths by window size: whole layout returns the id list, most of the grid runs one scan, a small window walks buckets.
+- Rebuilt only when the id list or position map changes identity, or view.ts#indexVersion is bumped for an in-place move.
+
+Shortcuts module src/shortcuts.ts exports Command, commandFor, swallows and SHORTCUTS:
+- commandFor maps a KeyboardEvent to a Command; view.ts#obey switches over it exhaustively, so a new Command must be handled.
+- SHORTCUTS is the `?` panel. A new key needs a row there as well as a branch in obey.
+
 View module src/view.ts exports VIEW_TYPE = 'image-graph-view' and ImageGraphView extends ItemView:
 - constructor(leaf: WorkspaceLeaf, host: GraphHost)
 - focusImage(imageId: string): void
@@ -41,6 +55,9 @@ View module src/view.ts exports VIEW_TYPE = 'image-graph-view' and ImageGraphVie
 - Normalized rectangle and polygon regions, whole-image/region edges, arbitrary YAML with relation label, optional arrows.
 - Whole vault uses cached overview atlas tiles at low zoom and bounded, adaptive detail thumbnails for visible images.
 - Navigate mode pans even over images. Move images mode changes positions and snaps whole-vault top-left coordinates to a 40px grid.
+- Wheel scrolls, ctrl/meta wheel zooms, deltaMode normalized. Shift-drag selects a band; dragging one selected image carries the selection.
+- Hover is read once per frame inside draw(), never per pointermove, and frozen while a gesture owns the pointer. pointerDown re-reads instead.
+- A selected region draws grips above 48 screen pixels; dragging one resizes through graph.ts#resizeRegion from the shape the drag began with.
 - Properties use a typed builder with plain-language labels. Serialized metadata remains arbitrary YAML-compatible data.
 - Exploration 1/2/3 hops, selective expansion, pins, relation filter, paths. Separate temporary layout restores whole-vault positions/camera.
 - Export whole/current/selected images using ViewFrame. Visual export is current viewport; ordinary Canvas cannot preserve region endpoints.

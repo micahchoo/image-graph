@@ -1,6 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {PropertyError, RESERVED_KEYS, parseProperties, parsePropertyValue, propertyMessage} from '../src/properties';
-import {parseRegionShape, relationOf} from '../src/graph';
+import {parseRegionShape, regionHandles, relationOf, resizeRegion, type HandleId} from '../src/graph';
+import type {RegionShape} from '../src/types';
 
 describe('property value contract', () => {
  it('keeps every value a companion note can hold', () => {
@@ -61,5 +62,42 @@ describe('connection relation', () => {
   for (const bad of [{relation: 42}, {relation: ''}, {relation: '  '}, {relation: null}, {}, null, ['relation']]) {
    expect(relationOf(bad)).toBeNull();
   }
+ });
+});
+
+describe('region handles', () => {
+ const rect:RegionShape={type:'rect',x:.2,y:.2,width:.4,height:.4};
+ const polygon:RegionShape={type:'polygon',points:[{x:0,y:0},{x:1,y:0},{x:.5,y:1}]};
+ // Fractions of an image accumulate float noise; six places is finer than any pixel.
+ const tidy=(shape:RegionShape):RegionShape=>shape.type==='rect'
+  ?{type:'rect',x:+shape.x.toFixed(6),y:+shape.y.toFixed(6),width:+shape.width.toFixed(6),height:+shape.height.toFixed(6)}
+  :{type:'polygon',points:shape.points.map(p=>({x:+p.x.toFixed(6),y:+p.y.toFixed(6)}))};
+ const move=(shape:RegionShape,handle:HandleId,x:number,y:number)=>tidy(resizeRegion(shape,handle,{x,y}));
+
+ it('puts a grip on every corner and every side', () => {
+  expect(regionHandles(rect).map(h=>h.id)).toEqual(['nw','n','ne','e','se','s','sw','w']);
+  expect(regionHandles(rect).map(h=>[h.id,+h.x.toFixed(6),+h.y.toFixed(6)])).toEqual(
+   [['nw',.2,.2],['n',.4,.2],['ne',.6,.2],['e',.6,.4],['se',.6,.6],['s',.4,.6],['sw',.2,.6],['w',.2,.4]]);
+  expect(regionHandles(polygon)).toEqual([{id:0,x:0,y:0},{id:1,x:1,y:0},{id:2,x:.5,y:1}]);
+ });
+
+ it('moves one side and leaves the others', () => {
+  expect(move(rect,'e',.9,.9)).toEqual({type:'rect',x:.2,y:.2,width:.7,height:.4});
+  expect(move(rect,'nw',.1,.05)).toEqual({type:'rect',x:.1,y:.05,width:.5,height:.55});
+  expect(move(rect,'s',.9,.9)).toEqual({type:'rect',x:.2,y:.2,width:.4,height:.7});
+ });
+
+ it('never leaves the image, inverts, or shrinks past a grip', () => {
+  const flat=move(rect,'e',.1,.5);
+  expect(flat.type==='rect'&&flat.width).toBeGreaterThan(0);
+  expect(move(rect,'w',-2,.5)).toEqual({type:'rect',x:0,y:.2,width:.6,height:.4});
+  expect(move(rect,'se',5,5)).toEqual({type:'rect',x:.2,y:.2,width:.8,height:.8});
+  // Applied to the shape the drag began with, a side that bottomed out comes back.
+  expect(move(resizeRegion(rect,'e',{x:0,y:.5}),'e',.9,.5)).not.toEqual(move(rect,'e',.9,.5));
+ });
+
+ it('drags one polygon corner and keeps it inside', () => {
+  expect(move(polygon,2,1.4,-.3)).toEqual({type:'polygon',points:[{x:0,y:0},{x:1,y:0},{x:1,y:0}]});
+  expect(move(polygon,0,.25,.25)).toEqual({type:'polygon',points:[{x:.25,y:.25},{x:1,y:0},{x:.5,y:1}]});
  });
 });

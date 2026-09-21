@@ -13,6 +13,7 @@ Other properties and tags are user metadata.
 `_Image Graph/Data/` contains JSON records for saved image positions, regions, and connections.
 The plugin divides records across files to keep individual updates small.
 Region coordinates are relative to the parent image.
+Select a region and drag one of its grips to resize it, or type the fractions under Region geometry.
 
 `_Image Graph/Exports/` contains Canvas exports and rendered snapshots.
 These files do not feed changes back into the graph.

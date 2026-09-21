@@ -35,20 +35,20 @@ Later sessions reuse these thumbnails from the vault.
 
 | Action | Control |
 | --- | --- |
-| Select an image or region | Click or tap |
-| Select several images | Shift-click |
-| Move an image | Choose Move images or press `M`, then drag |
-| Move the view | Drag in Navigate mode, or hold Space while dragging |
-| Zoom | Scroll or pinch |
+| Move the view | Drag, scroll, or hold Space while dragging |
+| Zoom | `Ctrl` or `⌘` and scroll, or pinch |
+| Select an image, region or connection | Click or tap |
+| Select several images | Shift-click, or shift-drag a band |
+| Move images | Press `M`, then drag one to carry the whole selection |
+| Nudge the selection | Arrow keys, five steps with `Shift` |
+| Resize a region | Select it, then drag one of its grips |
 | Context actions | Right click or long press |
 | Draw a rectangle | `R` |
 | Draw a polygon | `G`, select corners, then select Finish polygon |
 | Connect a selection | `C` |
 | Explore an image | `E` |
-| Expand neighbors | `X` |
-| Pin an exploration image | `P` |
 | Open properties | `I` |
-| Cancel an action | `Escape` |
+| Every shortcut | `?` |
 
 Keyboard controls apply inside the graph.
 Text fields retain normal typing behavior.

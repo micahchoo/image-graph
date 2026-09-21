@@ -79,6 +79,17 @@ const seededAngle = (id: string): number => {
  return (n >>> 0) / 0xffffffff * Math.PI * 2;
 };
 
+/** Stable, capacity-aware radii used by the bounded exploration layout. */
+export const hopRadii = (hop: number, count = 1, maxCard = 100): number => {
+ const cards = Math.max(1, count);
+ const clearance = Math.max(192, maxCard + 96);
+ return Math.max(1, Math.floor(hop)) * 420 + Math.max(0, (cards * clearance) / (Math.PI * 2) - 420);
+};
+
+/** Above this the edge-node pass costs more than the tangle it removes, and a graph that
+ * dense is unreadable whatever the routing. Measured in docs/PERFORMANCE.md. */
+const CLEARANCE_BUDGET = 24000;
+
 export function forceLayout(images: ImageRecord[], graph: Neighborhood, rootId: string, pinned: Set<string>, previous: Map<string, Rect>): Map<string, Rect> {
  const byId = new Map(images.map((image) => [image.id, image]));
  const positions = new Map<string, Rect>();
@@ -91,13 +102,28 @@ export function forceLayout(images: ImageRecord[], graph: Neighborhood, rootId: 
  // New nodes start on a stable ring around the root. This avoids the large,
  // biased seed cloud that otherwise takes many iterations to untangle.
  const initialRoot = positions.get(rootId);
- if (initialRoot) for (const id of graph.ids) {
-  if (previous.has(id) || id === rootId) continue;
-  const p = positions.get(id); if (!p) continue;
-  const angle = seededAngle(id);
-  const radius = Math.max(1, graph.distances.get(id) ?? 1) * 400;
-  p.x = initialRoot.x + Math.cos(angle) * radius;
-  p.y = initialRoot.y + Math.sin(angle) * radius;
+ const maxCard = graph.ids.reduce((size, id) => {
+  const image = positions.get(id); return image ? Math.max(size, image.width, image.height) : size;
+ }, 100);
+ const rings = new Map<number, string[]>();
+ for (const id of graph.ids) if (id !== rootId && positions.has(id) && !pinned.has(id)) {
+  const hop = graph.distances.get(id) ?? 1;
+  const ring=rings.get(hop)??[];ring.push(id);rings.set(hop,ring);
+ }
+ const ringCapacity = Math.max(1,...[...rings.values()].map(ids=>ids.length));
+ if (initialRoot) for(const [hop,ids] of [...rings.entries()].sort((a,b)=>a[0]-b[0])){
+  const phase=seededAngle(rootId);
+  const parentAngle=(id:string)=>{const parent=positions.get(graph.parents.get(id)?.imageId??rootId)!;return (Math.atan2(parent.y-initialRoot.y,parent.x-initialRoot.x)-phase+Math.PI*4)%(Math.PI*2);};
+  ids.sort((a,b)=>parentAngle(a)-parentAngle(b)||a.localeCompare(b));
+  // Allocate distinct slots over the entire hop, not per sibling group. Different
+  // branches must never start at the same point on the ring.
+  ids.forEach((id,slot)=>{
+   const p=positions.get(id)!;
+   const angle=phase+(slot+.5)/ids.length*Math.PI*2;
+   const radius=hopRadii(hop,ringCapacity,maxCard);
+   p.x=initialRoot.x+Math.cos(angle)*radius;
+   p.y=initialRoot.y+Math.sin(angle)*radius;
+  });
  }
  const movable = graph.ids.filter((id) => !pinned.has(id));
  const edgePairs = graph.edges.map((edge) => [edge.source.imageId, edge.target.imageId] as const).filter(([a, b]) => positions.has(a) && positions.has(b));
@@ -109,9 +135,10 @@ export function forceLayout(images: ImageRecord[], graph: Neighborhood, rootId: 
   for (let i = 0; i < graph.ids.length; i++) for (let j = i + 1; j < graph.ids.length; j++) {
    const leftId = graph.ids[i]; const rightId = graph.ids[j]; const a = positions.get(leftId)!; const b = positions.get(rightId)!;
    const dx = a.x - b.x; const dy = a.y - b.y; const distance = Math.max(1, Math.hypot(dx, dy));
-   const halfDiagonal = Math.hypot(a.width, a.height) / 2 + Math.hypot(b.width, b.height) / 2 + 48;
-   const requiredX = (a.width + b.width) / 2 + 48;
-   const requiredY = (a.height + b.height) / 2 + 48;
+   // Leave room for the caption and its hit area, not only the image pixels.
+   const halfDiagonal = Math.hypot(a.width, a.height) / 2 + Math.hypot(b.width, b.height) / 2 + 96;
+   const requiredX = (a.width + b.width) / 2 + 96;
+   const requiredY = (a.height + b.height) / 2 + 96;
    const overlap = Math.max(0, Math.min(requiredX - Math.abs(dx), requiredY - Math.abs(dy)));
    const required = Math.max(halfDiagonal, Math.min(requiredX, requiredY));
    const push = distance < required || overlap > 0 ? Math.min(100, Math.max((required - distance) * 0.28, overlap * 0.12)) : Math.min(12, 5000 / (distance * distance));
@@ -125,6 +152,33 @@ export function forceLayout(images: ImageRecord[], graph: Neighborhood, rootId: 
    if (force.has(aId)) { force.get(aId)!.x += fx; force.get(aId)!.y += fy; }
    if (force.has(bId)) { force.get(bId)!.x -= fx; force.get(bId)!.y -= fy; }
   }
+  // A connection drawn across an unrelated image is the commonest way this layout becomes
+  // unreadable, and nothing above knows a line exists: the node-node term only keeps
+  // rectangles apart. Push each node clear of the segments that pass too near it, and let
+  // the segment's ends give way in return, so a line bends around an image rather than
+  // dragging it along.
+  if (edgePairs.length * graph.ids.length <= CLEARANCE_BUDGET) for (const [aId, bId] of edgePairs) {
+   const a = positions.get(aId); const b = positions.get(bId); if (!a || !b) continue;
+   const ax = a.x + a.width / 2; const ay = a.y + a.height / 2;
+   const dx = b.x + b.width / 2 - ax; const dy = b.y + b.height / 2 - ay;
+   const lengthSquared = dx * dx + dy * dy || 1;
+   for (const id of graph.ids) {
+    if (id === aId || id === bId) continue;
+    const c = positions.get(id); if (!c) continue;
+    const cx = c.x + c.width / 2; const cy = c.y + c.height / 2;
+    const along = Math.max(0, Math.min(1, ((cx - ax) * dx + (cy - ay) * dy) / lengthSquared));
+    const offX = cx - (ax + along * dx); const offY = cy - (ay + along * dy);
+    const gap = Math.max(1e-6, Math.hypot(offX, offY));
+    const clearance = Math.hypot(c.width, c.height) / 2 + 96;
+    if (gap >= clearance) continue;
+    const push = Math.min(60, (clearance - gap) * 0.6);
+    const pushX = offX / gap * push; const pushY = offY / gap * push;
+    const node = force.get(id); if (node) { node.x += pushX; node.y += pushY; }
+    // Each end yields by its share of the segment, so the nearer end moves more.
+    const endA = force.get(aId); if (endA) { endA.x -= pushX * (1 - along) * 0.5; endA.y -= pushY * (1 - along) * 0.5; }
+    const endB = force.get(bId); if (endB) { endB.x -= pushX * along * 0.5; endB.y -= pushY * along * 0.5; }
+   }
+  }
   // Keep each hop on a soft radial ring around the root. This makes a
   // 1/2/3-hop exploration readable while allowing overlap and edge forces to
   // settle the exact position.
@@ -137,14 +191,14 @@ export function forceLayout(images: ImageRecord[], graph: Neighborhood, rootId: 
    const distance = Math.hypot(dx, dy);
    const directionX = distance > 1e-6 ? dx / distance : seededDirection.x / Math.max(1, Math.hypot(seededDirection.x, seededDirection.y));
    const directionY = distance > 1e-6 ? dy / distance : seededDirection.y / Math.max(1, Math.hypot(seededDirection.x, seededDirection.y));
-   const desired = Math.max(1, graph.distances.get(id) ?? 1) * 420;
-   const radial = (desired - distance) * 0.025;
+   const hop = graph.distances.get(id) ?? 1;
+   const desired = hopRadii(hop, ringCapacity, maxCard);
+   const radial = (desired - distance) * 0.08;
    force.get(id)!.x += directionX * radial;
    force.get(id)!.y += directionY * radial;
   }
   for (const id of movable) {
    const p = positions.get(id)!; const f = force.get(id)!;
-   const old = previous.get(id); if (old) { f.x += (old.x - p.x) * 0.8; f.y += (old.y - p.y) * 0.8; }
    if (id === rootId) continue;
    p.x += Math.max(-12, Math.min(12, f.x)); p.y += Math.max(-12, Math.min(12, f.y));
   }

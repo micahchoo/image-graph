@@ -94,7 +94,22 @@ slower than no index, which `docs/PERFORMANCE.md` records in full.
 The clips and these runs show desktop mouse and keyboard behaviour only. Touch,
 stylus, and mobile pointer behaviour are still unverified.
 
-## Limits
+## Exploration clarity update — September 20, 2026
+
+The layout update passed 76 Vitest tests and the release-script test.
+TypeScript, ESLint, the production build, and the release asset check passed.
+The build was installed and reloaded in Image vault.
+
+The three-hop runtime check displayed 16 connected images.
+Measured center distances formed separate bands: 328–634, 768–883, and 1115–1254 world units.
+Crop captions showed region names rather than generated file IDs.
+The [reviewed screenshot](decluttered-exploration.png) shows a selected connection, faint background links, and separated captions.
+
+Added tests cover three-hop spacing, a 150-image neighborhood, selective labels, filter/path emphasis, and readable crop captions.
+User-pinned positions remain fixed, even if their manual placement overlaps another card.
+Existing workflow GIFs predate this visual update.
+
+## Remaining limits
 
 Physical mobile interaction and multi-device synchronization remain unverified.
 `isDesktopOnly: false` rests on the absence of desktop-only imports, not on a device test.

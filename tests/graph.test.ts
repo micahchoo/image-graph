@@ -44,6 +44,28 @@ describe('image graph traversal', () => {
 });
 
 describe('graph geometry and layout', () => {
+ it('keeps three hop bands ordered for mixed-size cards and reserves caption space',()=>{
+  const images=Array.from({length:15},(_,i)=>({...image(String(i)),width:240,height:i%3===0?140:240}));
+  const links=Array.from({length:14},(_,i)=>edge(`e${i}`,String(Math.floor(i/2)),String(i+1)));
+  const graph=neighborhood({images,edges:links},'0',3,new Set(),'');
+  const result=forceLayout(images,graph,'0',new Set(),new Map());
+  const root=result.get('0')!;
+  const bands=new Map<number,number[]>();
+  for(const [id,r] of result){const hop=graph.distances.get(id)!;const radius=Math.hypot(r.x+r.width/2-root.x-root.width/2,r.y+r.height/2-root.y-root.height/2);bands.set(hop,[...(bands.get(hop)??[]),radius]);}
+  for(let hop=1;hop<3;hop++)expect(Math.max(...bands.get(hop)!)).toBeLessThan(Math.min(...bands.get(hop+1)!));
+  const cards=[...result.values()];
+  for(let i=0;i<cards.length;i++)for(let j=i+1;j<cards.length;j++){const a=cards[i],b=cards[j];expect(a.x+a.width+24<=b.x||b.x+b.width+24<=a.x||a.y+a.height+60<=b.y||b.y+b.height+60<=a.y).toBe(true);}
+ });
+
+ it('keeps a 150-image first-hop neighborhood finite and non-overlapping',()=>{
+  const images=Array.from({length:150},(_,i)=>({...image(String(i)),width:240,height:240}));
+  const graph=neighborhood({images,edges:images.slice(1).map(i=>edge(`e${i.id}`,'0',i.id))},'0',1,new Set(),'');
+  const result=forceLayout(images,graph,'0',new Set(),new Map());
+  const cards=[...result.values()];
+  for(const r of cards)expect(Number.isFinite(r.x)&&Number.isFinite(r.y)).toBe(true);
+  for(let i=0;i<cards.length;i++)for(let j=i+1;j<cards.length;j++){const a=cards[i],b=cards[j];expect(a.x+a.width<=b.x||b.x+b.width<=a.x||a.y+a.height+30<=b.y||b.y+b.height+30<=a.y).toBe(true);}
+ });
+
  it('handles rectangle/polygon boundaries and normalized endpoints', () => {
   expect(containsRegion({x: .5, y: .5}, {type: 'rect', x: .2, y: .2, width: .5, height: .5})).toBe(true);
   expect(containsRegion({x: 0, y: 0}, {type: 'polygon', points: [{x: 0, y: 0}, {x: 1, y: 0}, {x: .5, y: 1}]})).toBe(true);

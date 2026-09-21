@@ -1,3 +1,18 @@
+# 0.2.1
+
+A clearer exploration graph.
+
+- Images occupy hop-based bands around the starting image. Fit connections centers the starting image.
+- Relevant connections stand out. Other connections and region outlines stay faint.
+- Selection and hover reveal relation labels. Labels avoid images, captions, and other labels.
+- Extracted images use their region names as captions. Full filenames remain in Properties.
+- Connections route around unrelated images where a short route is available.
+- Layout spacing reserves room for captions and keeps manually pinned images fixed.
+
+Checked in Image vault with 20,005 images and a 16-image, three-hop exploration.
+All 76 behavior tests and the release-script test pass.
+Physical mobile interaction and multi-device synchronization remain unverified.
+
 # 0.2.0
 
 Canvas interaction, after a study of Penpot's workspace.

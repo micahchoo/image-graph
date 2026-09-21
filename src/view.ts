@@ -7,8 +7,10 @@ import {RESERVED_KEYS, propertyMessage} from './properties';
 import {NOTHING, imageSelection, keepImages, prune, selectTarget, selectedImages, type Selection} from './selection';
 import {SpatialIndex} from './spatial';
 import {SHORTCUTS, commandFor, swallows, type Command} from './shortcuts';
+import {LANE, midpointOf, routeOrthogonal} from './routing';
 import {detailSize} from './thumbnails';
 import {detached} from './dom';
+import {connectionStyle, imageCaptions, shortenLabel} from './presentation';
 
 export const VIEW_TYPE='image-graph-view';
 type Hit={endpoint:Endpoint}|{edge:EdgeRecord};
@@ -21,6 +23,8 @@ interface TileLayer {canvas:HTMLCanvasElement;doc:Document;camera:Camera;width:n
 interface Drag {pointer:number;kind:'waiting'|'pan'|'image'|'region'|'marquee'|'handle';start:Point;screen:Point;origin:Camera;hit:Hit|null;imageId?:string;origins?:Map<string,Rect>;marquee?:{base:ReadonlySet<string>;last:Point};forcePan:boolean;forceMove:boolean}
 const clamp=(v:number,min:number,max:number)=>Math.max(min,Math.min(max,v));
 const copy=(r:Rect):Rect=>({x:r.x,y:r.y,width:r.width,height:r.height});
+const overlaps=(a:Rect,b:Rect)=>a.x<b.x+b.width&&b.x<a.x+a.width&&a.y<b.y+b.height&&b.y<a.y+a.height;
+interface LabelJob {text:string;a:Point;b:Point;alpha:number;priority:number}
 const relation=(e:EdgeRecord)=>relationOf(e.properties)??'related to';
 const distance=(p:Point,a:Point,b:Point)=>{const dx=b.x-a.x,dy=b.y-a.y,t=clamp(((p.x-a.x)*dx+(p.y-a.y)*dy)/(dx*dx+dy*dy||1),0,1);return Math.hypot(p.x-a.x-t*dx,p.y-a.y-t*dy);};
 
@@ -37,6 +41,7 @@ export class ImageGraphView extends ItemView {
  private propertyBuilders:Array<{dispose():void}>=[];
  private snapshot:GraphSnapshot={images:[],regions:[],edges:[]};
  private images=new Map<string,ImageRecord>();
+ private captions=new Map<string,string>();
  private regions=new Map<string,RegionRecord>();
  private regionsByImage=new Map<string,RegionRecord[]>();
  private wholePositions=new Map<string,Rect>();
@@ -44,6 +49,11 @@ export class ImageGraphView extends ItemView {
  private index:{ids:readonly string[];positions:Map<string,Rect>;version:number;value:SpatialIndex}|null=null;
  // Bumped where a position map is changed in place rather than replaced.
  private indexVersion=0;
+ // A route is world geometry, so it survives panning and zooming. It is cleared with the
+ // index, which is exactly when a rectangle moved.
+ private routes=new Map<string,Point[]|null>();
+ /** Above this many connections on screen, routing costs more than the tangle it removes. */
+ private static readonly ROUTE_LIMIT=240;
  private camera:Camera={x:0,y:0,scale:1};
  private exploration:Exploration|null=null;
  private selection:Selection=NOTHING;
@@ -138,6 +148,7 @@ export class ImageGraphView extends ItemView {
  async onClose():Promise<void>{this.active=false;this.metadataTicket++;this.clearLongPress();this.win.clearTimeout(this.zoomTimer);for(const builder of this.propertyBuilders)builder.dispose();this.propertyBuilders=[];this.unsubscribe?.();this.unsubscribe=null;this.observer?.disconnect();this.observer=null;this.win.cancelAnimationFrame(this.raf);this.raf=0;this.pointers.clear();this.releaseLayer();}
  private refresh(){
   if(!this.active)return;this.snapshot=this.host.getSnapshot();this.images=new Map(this.snapshot.images.map(i=>[i.id,i]));this.regions=new Map(this.snapshot.regions.map(r=>[r.id,r]));this.regionsByImage.clear();
+  this.captions=imageCaptions(this.snapshot.images,this.snapshot.regions,this.snapshot.edges);
   for(const r of this.snapshot.regions){const list=this.regionsByImage.get(r.imageId)??[];list.push(r);this.regionsByImage.set(r.imageId,list);}
   this.wholePositions=new Map(this.snapshot.images.map(i=>[i.id,copy(i)]));this.wholeIds=this.snapshot.images.map(i=>i.id);
   this.pruneSelection(id=>this.images.has(id));this.hoverRead=null;
@@ -150,7 +161,7 @@ export class ImageGraphView extends ItemView {
  private spatial():SpatialIndex{
   const ids=this.shownIds(),positions=this.positions,current=this.index;
   if(current&&current.ids===ids&&current.positions===positions&&current.version===this.indexVersion)return current.value;
-  const value=new SpatialIndex(ids,positions);this.index={ids,positions,version:this.indexVersion,value};return value;
+  const value=new SpatialIndex(ids,positions);this.index={ids,positions,version:this.indexVersion,value};this.routes.clear();return value;
  }
  /** What the viewport covers in world coordinates. */
  private viewRect(w:number,h:number,camera:Camera=this.camera):Rect{return{x:-camera.x/camera.scale,y:-camera.y/camera.scale,width:w/camera.scale,height:h/camera.scale};}
@@ -178,6 +189,13 @@ export class ImageGraphView extends ItemView {
   // Rings stay live so a selection never rebuilds the layer. Labels need 60 screen pixels
   // of image width, which no image reaches while the layer is in use.
   const hovered=this.hover&&'endpoint'in this.hover?this.hover.endpoint:null,hoverEdge=this.hover&&'edge'in this.hover?this.hover.edge.id:null;
+  const drawn=this.shownEdges().filter(edge=>{const source=this.positions.get(edge.source.imageId),target=this.positions.get(edge.target.imageId);return source&&target&&this.spans(source,target,w,h);});
+  const steps=this.path(),highlight=new Set(steps.map(step=>step.edge.id)),filter=this.exploration?.filter??'';
+  const focus={selected:this.selected,selectedEdge:this.selectedEdge,hoveredImage:hovered?.imageId??null,hoveredEdge:hoverEdge,path:highlight,filter,exploring:Boolean(this.exploration)};
+  const edgeStyles=new Map(drawn.map(edge=>[edge.id,connectionStyle(edge,relation(edge),focus)]));
+  const activeRegions=new Set<string>();
+  for(const edge of drawn)if(edgeStyles.get(edge.id)?.label){if(edge.source.regionId)activeRegions.add(edge.source.regionId);if(edge.target.regionId)activeRegions.add(edge.target.regionId);}
+  const captionBoxes:Rect[]=[];
   // A group reads as a group: each member keeps a thinner ring and one band holds them all.
   const many=this.selectionImages.size>1;
   const ring=(r:Rect,style:string,width:number)=>{ctx.strokeStyle=style;ctx.lineWidth=width/s;ctx.strokeRect(r.x,r.y,r.width,r.height);};
@@ -195,27 +213,51 @@ export class ImageGraphView extends ItemView {
    if(thumb)ctx.drawImage(thumb,r.x,r.y,r.width,r.height);
    else{const tile=this.host.overviewThumbnail(image,this.redraw);if(tile)ctx.drawImage(tile.source,tile.x,tile.y,tile.width,tile.height,r.x,r.y,r.width,r.height);}
    outline(id,r);
-   if(r.width*s>60){ctx.font=`${12/s}px sans-serif`;ctx.fillStyle=fg;const label=image.path.split('/').pop()??image.path;ctx.fillText(label+(this.exploration?.pinned.has(id)?' · pinned':''),r.x,r.y+r.height+16/s);}
+   if(r.width*s>60){
+    ctx.font=`${12/s}px sans-serif`;ctx.fillStyle=fg;
+    const label=(this.captions.get(id)??'Image')+(this.exploration?.pinned.has(id)?' · pinned':'');
+    const text=shortenLabel(label,r.width,t=>ctx.measureText(t).width);
+    const box={x:r.x,y:r.y+r.height+3/s,width:r.width,height:19/s};
+    if(!this.spatial().query(box).length&&!captionBoxes.some(other=>overlaps(box,other))){ctx.fillText(text,r.x,box.y+13/s);captionBoxes.push(box);}
+    if(this.exploration?.root===id){
+     const badge='Starting image',width=ctx.measureText(badge).width+12/s;
+     const box={x:r.x,y:r.y-25/s,width,height:20/s};captionBoxes.push(box);
+     ctx.fillStyle=accent;ctx.fillRect(box.x,box.y,box.width,box.height);ctx.fillStyle=bg;ctx.fillText(badge,box.x+6/s,box.y+14/s);
+    }
+   }
   }
   if(many){const band=this.bounds(this.selected);if(band){ctx.save();ctx.setLineDash([7/s,5/s]);ring({x:band.x-6/s,y:band.y-6/s,width:band.width+12/s,height:band.height+12/s},'#ffe0a0',1);ctx.restore();}}
   const resizing=this.draft?.kind==='resize'?this.draft:null;
   if(s>.06)for(const id of shown){const r=this.positions.get(id);if(!r)continue;for(const region of this.regionsByImage.get(id)??[]){
    const chosen=region.id===this.selectedRegion,shape=resizing?.regionId===region.id?resizing.shape:region.shape;
-   ctx.strokeStyle=chosen?'#ffe0a0':region.id===hovered?.regionId?'#a6f5d2':'#69dfb0';ctx.lineWidth=(chosen?3:1.5)/s;this.shape(ctx,r,shape);ctx.stroke();
+   const active=chosen||region.id===hovered?.regionId||activeRegions.has(region.id);
+   ctx.globalAlpha=active?1:(this.exploration?.root===id ? .2 : .12);
+   ctx.strokeStyle=chosen?'#ffe0a0':region.id===hovered?.regionId?'#a6f5d2':'#69dfb0';ctx.lineWidth=(chosen?3:active?1.5:1)/s;this.shape(ctx,r,shape);ctx.stroke();ctx.globalAlpha=1;
    // Grips appear only where they can be gripped: eight of them inside 24 screen pixels is a smear.
    if(chosen&&Math.min(r.width,r.height)*s>48){ctx.fillStyle='#ffe0a0';const size=4/s;
     for(const grip of regionHandles(shape))ctx.fillRect(r.x+grip.x*r.width-size,r.y+grip.y*r.height-size,size*2,size*2);}
   }}
-  const steps=this.path(),highlight=new Set(steps.map(step=>step.edge.id)),filter=this.exploration?.filter??'';
-  for(const edge of this.shownEdges()){
-   const source=this.positions.get(edge.source.imageId),target=this.positions.get(edge.target.imageId);
-   if(!source||!target||!this.spans(source,target,w,h))continue;
-   const{source:a,target:b}=edgeEndpoints(edge,this.positions,this.regions),bright=edge.id===this.selectedEdge||highlight.has(edge.id),warm=edge.id===hoverEdge;
-   const matches=!filter||relation(edge)===filter;
-   ctx.globalAlpha=filter&&!matches?.12:highlight.size&&!bright?.22:1;ctx.strokeStyle=ctx.fillStyle=bright||warm?'#ffe0a0':accent;ctx.lineWidth=(bright||filter&&matches?3:warm?2.6:1.4)/s;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+  // Labels are collected and placed after every line is drawn, so one can see the others
+  // and none is buried under a later line.
+  const labels:LabelJob[]=[];
+  // Routing wants a settled layout: during an image drag every rectangle moves each frame,
+  // and a path recomputed per frame flickers more than a straight line offends.
+  const routing=s>.06&&drawn.length<=ImageGraphView.ROUTE_LIMIT&&this.drag?.kind!=='image';
+  for(const edge of drawn){
+   const{source:a,target:b}=edgeEndpoints(edge,this.positions,this.regions),style=edgeStyles.get(edge.id)!;
+   const {alpha}=style;
+   const path=routing?this.route(edge,a,b):[a,b];
+   ctx.globalAlpha=alpha;ctx.strokeStyle=ctx.fillStyle=style.emphasized?'#ffe0a0':accent;ctx.lineWidth=style.width/s;
+   this.strokePath(ctx,path,s);
    const arrow=(from:Point,to:Point)=>{const angle=Math.atan2(to.y-from.y,to.x-from.x),size=9/s;ctx.beginPath();ctx.moveTo(to.x,to.y);ctx.lineTo(to.x-size*Math.cos(angle-.45),to.y-size*Math.sin(angle-.45));ctx.lineTo(to.x-size*Math.cos(angle+.45),to.y-size*Math.sin(angle+.45));ctx.closePath();ctx.fill();};
-   if(s>.06){if(edge.direction==='forward'||edge.direction==='both')arrow(a,b);if(edge.direction==='reverse'||edge.direction==='both')arrow(b,a);const label=relation(edge);ctx.font=`${12/s}px sans-serif`;const x=(a.x+b.x)/2,y=(a.y+b.y)/2;ctx.fillStyle=bg;ctx.fillRect(x-4/s,y-14/s,ctx.measureText(label).width+8/s,20/s);ctx.fillStyle=fg;ctx.fillText(label,x,y);}
+   if(s>.06){
+    // An arrowhead points along the segment it arrives on, not at the far end of the path.
+    if(edge.direction==='forward'||edge.direction==='both')arrow(path[path.length-2],path[path.length-1]);
+    if(edge.direction==='reverse'||edge.direction==='both')arrow(path[1],path[0]);
+    if(style.label){const middle=midpointOf(path);labels.push({text:relation(edge),a:middle.a,b:middle.b,alpha,priority:edge.id===this.selectedEdge||edge.id===hoverEdge?0:highlight.has(edge.id)?1:2});}
+   }
   }ctx.globalAlpha=1;
+  this.drawLabels(ctx,labels,s,bg,fg,captionBoxes);
   const drag=this.drag;
   if(drag?.kind==='marquee'&&drag.marquee){const band=this.band(drag.start,drag.marquee.last);ctx.save();ctx.setLineDash([6/s,4/s]);ctx.strokeStyle='#ffe0a0';ctx.lineWidth=1/s;ctx.strokeRect(band.x,band.y,band.width,band.height);ctx.restore();}
   const draft=this.draft;
@@ -229,6 +271,60 @@ export class ImageGraphView extends ItemView {
   const progress=this.host.thumbnailProgress();
   this.status.setText(`${ex?`${ex.graph.ids.length} connected / `:''}${this.images.size.toLocaleString()} images · ${visible.toLocaleString()} visible · ${this.mode==='select'?'Drag to pan · shift-drag selects · ? lists the shortcuts':this.mode==='move'?'Drag an image to move · whole-vault positions snap to the 40px grid · Escape to pan':this.mode==='connect'?(this.pending?'Choose target':'Choose source'):`Draw ${this.mode}`} ${ex?.graph.capped?'· Neighborhood limit: 150':''}${filter?` · ${this.shownEdges().filter(e=>relation(e)===filter).length} matching links; context dimmed`:''}${progress.ready<progress.total?` · Overview thumbnails ${progress.ready.toLocaleString()}/${progress.total.toLocaleString()}`:''}`);
   this.pathText.toggleClass('is-hidden',!ex);if(ex){const target=[...this.selected][0];this.pathText.setText(target&&target!==ex.root&&steps.length?`One shortest path · ${steps.length} hops\n`+steps.map(step=>{const e=step.edge,forward=e.source.imageId===step.from,from=forward?e.source:e.target,to=forward?e.target:e.source,arrow=e.direction==='both'?'↔':e.direction==='none'?'—':(e.direction==='forward')===forward?'→':'←';return `${this.describe(from)} ${arrow} ${relation(e)} ${arrow} ${this.describe(to)}`;}).join('\n'):'Starting image anchored · select an image to trace its path. Links can be traversed either way.');}
+ }
+ /** A label at the midpoint of a connection lands on an image about half the time. Try a few
+  * points along the line and a step to either side, and take the first that is clear of the
+  * images and of the labels already placed. */
+ /** The path a connection takes: around the images between its ends where one can be found
+  * and is not a wild detour, and straight otherwise. Cached, because the answer only changes
+  * when a rectangle moves. */
+ private route(edge:EdgeRecord,a:Point,b:Point):Point[]{
+  const cached=this.routes.get(edge.id);
+  if(cached!==undefined)return cached??[a,b];
+  const area={x:Math.min(a.x,b.x)-LANE*2,y:Math.min(a.y,b.y)-LANE*2,width:Math.abs(a.x-b.x)+LANE*4,height:Math.abs(a.y-b.y)+LANE*4};
+  const obstacles:Rect[]=[];
+  for(const id of this.spatial().query(area)){
+   if(id===edge.source.imageId||id===edge.target.imageId)continue;
+   const r=this.positions.get(id);if(r)obstacles.push(r);
+  }
+  const path=obstacles.length?routeOrthogonal(a,b,obstacles):null;
+  this.routes.set(edge.id,path);
+  return path??[a,b];
+ }
+ /** Corners are rounded so a right-angled path reads as one line rather than three. */
+ private strokePath(ctx:CanvasRenderingContext2D,path:Point[],s:number){
+  ctx.beginPath();ctx.moveTo(path[0].x,path[0].y);
+  if(path.length===2){ctx.lineTo(path[1].x,path[1].y);ctx.stroke();return;}
+  let shortest=Infinity;
+  for(let i=1;i<path.length;i++)shortest=Math.min(shortest,Math.hypot(path[i].x-path[i-1].x,path[i].y-path[i-1].y));
+  const radius=Math.min(14/s,shortest/2);
+  for(let i=1;i<path.length-1;i++)ctx.arcTo(path[i].x,path[i].y,path[i+1].x,path[i+1].y,radius);
+  ctx.lineTo(path[path.length-1].x,path[path.length-1].y);ctx.stroke();
+ }
+ private drawLabels(ctx:CanvasRenderingContext2D,labels:LabelJob[],s:number,bg:string,fg:string,captions:Rect[]){
+  if(!labels.length)return;
+  ctx.font=`${12/s}px sans-serif`;
+  const height=20/s,taken:Rect[]=[...captions];
+  for(const label of labels.sort((a,b)=>a.priority-b.priority)){
+   const box=this.labelBox(label.a,label.b,ctx.measureText(label.text).width+8/s,height,taken);
+   if(!box)continue;
+   taken.push(box);
+   ctx.globalAlpha=label.alpha;
+   ctx.fillStyle=bg;ctx.fillRect(box.x,box.y,box.width,box.height);
+   ctx.fillStyle=fg;ctx.fillText(label.text,box.x+4/s,box.y+14/s);
+  }
+  ctx.globalAlpha=1;
+ }
+ private labelBox(a:Point,b:Point,width:number,height:number,taken:Rect[]):Rect|null{
+  const dx=b.x-a.x,dy=b.y-a.y,length=Math.hypot(dx,dy)||1,offX=-dy/length*height*1.15,offY=dx/length*height*1.15;
+  for(const along of [.5,.4,.6,.3,.7,.2,.8])for(const side of [0,-1,1,-2,2]){
+   const box={x:a.x+dx*along+offX*side-width/2,y:a.y+dy*along+offY*side-height/2,width,height};
+   if(this.spatial().query(box).length||taken.some(other=>overlaps(box,other)))continue;
+   const viewport=this.viewRect(this.canvas.clientWidth,this.canvas.clientHeight);
+   if(box.x<viewport.x||box.y<viewport.y||box.x+box.width>viewport.x+viewport.width||box.y+box.height>viewport.y+viewport.height)continue;
+   return box;
+  }
+  return null;
  }
  /** Atlas tiles for the whole shown set, rendered once into a bitmap that covers the viewport
   * and a margin. Reused until the scale, the data, or the camera leaves that margin. Selection
@@ -546,9 +642,17 @@ export class ImageGraphView extends ItemView {
  pinImage(imageId:string){const ex=this.exploration;if(!ex||imageId===ex.root)return;if(ex.pinned.has(imageId))ex.pinned.delete(imageId);else ex.pinned.add(imageId);this.schedule();}
  private rebuild(refit:boolean){const ex=this.exploration;if(!ex)return;ex.graph=neighborhood(this.snapshot,ex.root,ex.depth,ex.expanded,'',150);ex.positions=forceLayout(this.snapshot.images,ex.graph,ex.root,ex.pinned,ex.positions);this.indexVersion++;this.pruneSelection(id=>ex.positions.has(id));if(refit)this.fit();this.schedule();}
  exitExploration(){const ex=this.exploration;if(!ex)return;this.camera={...ex.savedCamera};this.exploration=null;this.setSelection(keepImages(this.selection));this.cancel();this.schedule();}
- private fit(box:Rect|null=this.bounds(this.positions.keys())){
+ private fit(box?:Rect|null){
+  const root=!box&&this.exploration?this.positions.get(this.exploration.root):null;
+  box=box??this.bounds(this.positions.keys());
   if(!box)return;
   const w=this.canvas.clientWidth||800,h=this.canvas.clientHeight||600;
+  if(root){
+   const x=root.x+root.width/2,y=root.y+root.height/2;
+   const width=2*Math.max(x-box.x,box.x+box.width-x),height=2*Math.max(y-box.y,box.y+box.height-y);
+   const scale=clamp(Math.min((w-100)/(width+100),(h-160)/(height+100)),.002,2);
+   this.camera={scale,x:w/2-x*scale,y:(h-35)/2-y*scale};this.schedule();return;
+  }
   const scale=clamp(Math.min((w-80)/(box.width+100),(h-150)/(box.height+100)),.002,2);
   this.camera={scale,x:w/2-(box.x+box.width/2)*scale,y:(h-35)/2-(box.y+box.height/2)*scale};this.schedule();
  }

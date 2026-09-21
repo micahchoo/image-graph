@@ -2,7 +2,7 @@
 
 Explore your image vault, mark regions, and connect images with labeled relationships.
 
-![A region is drawn on an image and named, the region becomes its own image, two images are connected with a labeled relation, and one image opens as a graph of its neighbors.](https://raw.githubusercontent.com/micahchoo/image-graph/0.1.0/docs/workflows/workflows.gif)
+![Three-hop exploration with a centered starting image, readable crop captions, and a highlighted connection.](https://raw.githubusercontent.com/micahchoo/image-graph/0.2.1/docs/decluttered-exploration.png)
 
 ## Features
 
@@ -82,8 +82,15 @@ Exploration follows connections in either direction.
 Arrowheads still show each connection's stated direction.
 A path through several images does not assert a direct relationship between its ends.
 
-Exploration uses a temporary force layout.
+Exploration uses a temporary force layout organized into hop bands.
+The starting image stays centered when you fit the connections.
+Background connections and region outlines stay faint.
+Selecting an image or hovering over a connection reveals relevant labels.
+Labels avoid images, captions, and other labels. Crowded labels stay hidden.
+Extracted images use region names as captions. Full filenames remain in Properties.
 Returning to the whole vault restores its arrangement and viewport.
+
+See the [current exploration layout](docs/decluttered-exploration.png).
 
 ## Export
 

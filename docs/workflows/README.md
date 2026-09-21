@@ -54,6 +54,9 @@ replaces it with `same lighting`, which the saved edge record then holds. The
 
 ## Explore connections
 
+The clip below predates the quieter hop-based layout.
+The controls are unchanged. The [current screenshot](../decluttered-exploration.png) shows selective labels and shorter crop captions.
+
 ![An image opens as a force-laid graph of its neighbors; the depth control widens it to two hops, and a selected image traces a highlighted path back to the start.](explore.gif)
 
 1. Right click an image.

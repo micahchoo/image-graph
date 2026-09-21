@@ -1,4 +1,4 @@
-# Unreleased
+# 0.2.0
 
 Canvas interaction, after a study of Penpot's workspace.
 
@@ -18,7 +18,13 @@ Canvas interaction, after a study of Penpot's workspace.
 - `?` lists every shortcut. `Shift` with `0`, `1` or `2` zooms to 100%, to
   everything, or to the selection.
 - A spatial index backs the renderer and the hit test, so both cost the viewport
-  rather than the vault. See [performance](PERFORMANCE.md).
+  rather than the vault.
+
+Verified against the same vault of 20,005 generated images with trusted input:
+band selection, a region grip resizing and saving, several images moving
+together, and hover naming an image against a region. See
+[performance](https://github.com/micahchoo/image-graph/blob/0.2.0/docs/PERFORMANCE.md)
+and [verification](https://github.com/micahchoo/image-graph/blob/0.2.0/docs/verification.md).
 
 # 0.1.0
 

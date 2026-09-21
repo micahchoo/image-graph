@@ -63,6 +63,37 @@ Evidence, method and remaining limits: [rendering performance](PERFORMANCE.md).
 The cached tile layer was compared against the direct path pixel by pixel: identical where the sub-pixel phases align, and a mean of 1 to 2 of 255 elsewhere.
 An audit of those changes found and fixed three defects: eviction releasing a page its own load still held, the layer pinning stale theme colours, and the layer outliving a popout document.
 
+## Canvas interaction, 0.2.0
+
+Every gesture below was driven through `Input.dispatchMouseEvent` and
+`Input.dispatchKeyEvent`, so the canvas received trusted events, against the
+installed build in the vault of 20,005 images.
+
+| Gesture | Observed |
+| --- | --- |
+| Wheel, no modifier | Camera panned by the delta on both axes |
+| `Ctrl` and wheel | Scale went 0.0200 to 0.0287 about the pointer |
+| Shift-drag across the mosaic | 242 images selected, one band drawn, drag released clean |
+| Pointer resting on an image, then inside its region | Reported image, then region; cursor `target` |
+| Pointer resting on the `se` grip of a selected region | Reported grip `se`; cursor `grip` |
+| Dragging that grip | Width 0.40 to 0.58 live, saved once on release, draft cleared |
+| Dragging one of four selected images | All four moved by the same offset |
+| `ArrowRight`, then `Shift` and `ArrowDown` | Moved 40, then 200 |
+| Arrow with nothing selected | Camera panned; no image moved |
+| `?` then `Escape` | Panel opened with 4 groups and 24 rows, then closed |
+
+The selection states the 0.1.0 model could reach were re-run and are gone:
+shift-clicking a connection while an image is selected now reports
+`{kind: edge, images: 0}`, and a region selection always carries its image.
+
+Two defects were found by these runs and fixed before the release. Hover updated
+only while a button was held, because `pointerMove` returns early for a pointer
+it is not tracking. The first spatial index made whole-vault panning 21 times
+slower than no index, which `docs/PERFORMANCE.md` records in full.
+
+The clips and these runs show desktop mouse and keyboard behaviour only. Touch,
+stylus, and mobile pointer behaviour are still unverified.
+
 ## Limits
 
 Physical mobile interaction and multi-device synchronization remain unverified.

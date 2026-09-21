@@ -1,6 +1,8 @@
 import type {TFile} from 'obsidian';
 
-export type Properties = Record<string, unknown>;
+/** Everything a companion note's frontmatter can hold. `properties.ts` is the only parser. */
+export type PropertyValue = string | number | boolean | null | PropertyValue[] | {[key: string]: PropertyValue};
+export type Properties = Record<string, PropertyValue>;
 export interface Point {x:number;y:number}
 export interface Rect {x:number;y:number;width:number;height:number}
 export type RegionShape = ({type:'rect'} & Rect) | {type:'polygon';points:Point[]};

@@ -1,6 +1,8 @@
 import {parseYaml} from 'obsidian';
 import type {App, TAbstractFile, TFile} from 'obsidian';
 import type {EdgeRecord, GraphSnapshot, ImageRecord, Properties, RegionRecord} from './types';
+import {RESERVED_KEYS, parseProperties} from './properties';
+import {parseRegionShape, relationOf} from './graph';
 
 const ROOT = '_Image Graph';
 const DATA = `${ROOT}/Data`;
@@ -91,13 +93,14 @@ export class GraphStore {
     let frontmatter: unknown;
     try { frontmatter = match ? parseYaml(match[1]) : undefined; } catch { throw new Error(`Invalid YAML in companion note: ${metadataPath}`); }
     if (!isRecord(frontmatter)) return {};
-    return cleanProperties(frontmatter);
+    // A note is the owner's; a value the panel cannot edit must not stop the panel opening.
+    try { return parseProperties(cleanProperties(frontmatter)); } catch { return readable(cleanProperties(frontmatter)); }
   }
 
   async writeMetadata(imageId: string, properties: Properties): Promise<void> {
     await this.mutate(async () => {
       const image = this.images.get(imageId); if (!image) throw new Error(`Unknown image: ${imageId}`);
-      const safe = validateProperties(properties); const file = await this.ensureCompanionInternal(imageId);
+      const safe = parseProperties(properties, RESERVED_KEYS); const file = await this.ensureCompanionInternal(imageId);
       await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
         for (const key of Object.keys(frontmatter)) if (key !== 'image' && key !== 'image_graph_id' && !(key in safe)) delete frontmatter[key];
         Object.assign(frontmatter, safe, {image: `[[${image.path}]]`, image_graph_id: image.id});
@@ -123,7 +126,7 @@ export class GraphStore {
   async flush(): Promise<void> { await this.queue; }
 
   private async upsert(kind: Kind, record: Stored): Promise<void> { await this.mutate(async () => {
-    record = clone(record); validateRecord(kind, record);
+    validateRecord(kind, record, true); record = clone(record);
     if (kind === 'edges') { const edge = record as EdgeRecord; for (const endpoint of [edge.source, edge.target]) if (endpoint.regionId && this.regions.get(endpoint.regionId)?.imageId !== endpoint.imageId) throw new Error('The connection refers to an unknown region.'); }
     if (kind === 'regions') await this.ensureCompanionInternal((record as RegionRecord).imageId);
     if (kind === 'edges') { const edge = record as EdgeRecord; await this.ensureCompanionInternal(edge.source.imageId); await this.ensureCompanionInternal(edge.target.imageId); }
@@ -174,29 +177,38 @@ function shardIndex(id: string): number { let hash = 0; for (const char of id) h
 function shardPath(kind: Kind, index: number): string { return `${DATA}/${kind}-${index.toString(16).padStart(2, '0')}.json`; }
 function parseShardName(path: string): {kind: Kind; index: number} | undefined { const match = path.match(new RegExp(`^${DATA}/(images|regions|edges)-([0-9a-f]{2})\\.json$`)); return match ? {kind: match[1] as Kind, index: Number.parseInt(match[2], 16)} : undefined; }
 function parseShard(text: string, kind: Kind, index: number): Stored[] { let value: unknown; try { value = JSON.parse(text); } catch { throw new Error(`Corrupt Image Graph shard: ${shardPath(kind, index)}`); } if (!value || typeof value !== 'object' || (value as Shard).version !== VERSION || (value as Shard).kind !== kind || !Array.isArray((value as Shard).records)) throw new Error(`Invalid Image Graph shard: ${shardPath(kind, index)}`); const records = (value as Shard).records; records.forEach(record => validateRecord(kind, record)); return records; }
-function validateRecord(kind: Kind, record: unknown): asserts record is Stored {
+/**
+ * `strict` is for writes. A shard read from the vault is accepted more liberally, because one
+ * hand-edited field should not stop a whole shard loading; the write path is where the rules bite.
+ */
+function validateRecord(kind: Kind, record: unknown, strict = false): asserts record is Stored {
  if (!isRecord(record) || typeof record.id !== 'string' || !record.id) throw new Error(`Invalid ${kind} record`);
  if (kind === 'images' && (typeof record.path !== 'string' || !record.path || !finite(record.x) || !finite(record.y) || !finite(record.width) || record.width <= 0 || !finite(record.height) || record.height <= 0)) throw new Error('Invalid image record');
- if (kind === 'regions' && (typeof record.imageId !== 'string' || !record.imageId || typeof record.label !== 'string' || !validShape(record.shape) || !isRecord(record.properties))) throw new Error('Invalid region record');
- if (kind === 'edges' && (!validEndpoint(record.source) || !validEndpoint(record.target) || !['none', 'forward', 'reverse', 'both'].includes(record.direction as string) || !isRecord(record.properties))) throw new Error('Invalid edge record');
- if (kind !== 'images') validateYamlValue(record.properties);
-}
-function validShape(value: unknown): boolean {
- if (!isRecord(value) || (value.type !== 'rect' && value.type !== 'polygon')) return false;
- const normalized = (n:unknown):n is number => finite(n) && n >= 0 && n <= 1;
- if (value.type === 'rect') return normalized(value.x) && normalized(value.y) && finite(value.width) && value.width > 0 && value.x+value.width <= 1.000001 && finite(value.height) && value.height > 0 && value.y+value.height <= 1.000001;
- return Array.isArray(value.points) && value.points.length >= 3 && value.points.every(point => isRecord(point) && normalized(point.x) && normalized(point.y));
+ if (kind === 'regions') {
+  if (typeof record.imageId !== 'string' || !record.imageId) throw new Error('A region must belong to an image.');
+  if (typeof record.label !== 'string') throw new Error('Give the region a label.');
+  record.shape = parseRegionShape(record.shape);
+ }
+ if (kind === 'edges') {
+  if (!validEndpoint(record.source) || !validEndpoint(record.target)) throw new Error('A connection needs a source and a target.');
+  if (!['none', 'forward', 'reverse', 'both'].includes(record.direction as string)) throw new Error('Choose an arrow direction.');
+  // A connection without a relation has simply not been described yet. One that carries an
+  // unusable relation is corrupt, and the renderer used to hide that behind its own fallback.
+  if (strict && isRecord(record.properties) && 'relation' in record.properties && !relationOf(record.properties)) {
+   throw new Error('Describe the connection in relation, as text, for example “resembles”.');
+  }
+ }
+ if (kind !== 'images') record.properties = parseProperties(record.properties);
 }
 function validEndpoint(value: unknown): boolean { return isRecord(value) && typeof value.imageId === 'string' && value.imageId.length > 0 && (!('regionId' in value) || typeof value.regionId === 'string' && value.regionId.length > 0); }
 function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
 function finite(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value); }
 function clone<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
-function validateProperties(properties: Properties): Properties { if (!isRecord(properties)) throw new Error('Metadata must be a mapping'); for (const key of Object.keys(properties)) { if (key === 'image' || key === 'image_graph_id' || key === '__proto__' || key === 'constructor' || key === 'prototype') throw new Error(`Invalid metadata property: ${key}`); validateYamlValue(properties[key]); } return clone(properties); }
-function validateYamlValue(value: unknown): void {
- if (value === null || typeof value === 'string' || typeof value === 'boolean' || finite(value)) return;
- if (Array.isArray(value)) { value.forEach(validateYamlValue); return; }
- if (isRecord(value) && Object.getPrototypeOf(value) === Object.prototype) { for (const key of Object.keys(value)) { if (key === '__proto__' || key === 'constructor' || key === 'prototype') throw new Error(`Invalid metadata property: ${key}`); validateYamlValue(value[key]); } return; }
- throw new Error('Metadata contains an unsupported value');
+function cleanProperties(properties: Record<string, unknown>): Record<string, unknown> { const result = {...properties}; delete result.image; delete result.image_graph_id; return result; }
+/** Keep every value the panel can show and drop the rest, so one odd field is not a dead end. */
+function readable(properties: Record<string, unknown>): Properties {
+ const result: Properties = {};
+ for (const [key, value] of Object.entries(properties)) { try { result[key] = parseProperties({[key]: value})[key]; } catch { /* shown in the note, not here */ } }
+ return result;
 }
-function cleanProperties(properties: Properties): Properties { const result = {...properties}; delete result.image; delete result.image_graph_id; return result; }
 function yamlScalar(value: string): string { return JSON.stringify(value); }

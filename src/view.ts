@@ -1,8 +1,9 @@
 import {ItemView, Menu, Notice, WorkspaceLeaf} from 'obsidian';
 import type {Camera, Direction, EdgeRecord, Endpoint, GraphHost, GraphSnapshot, ImageRecord, Point, Properties, Rect, RegionRecord, RegionShape, ViewFrame} from './types';
 import {newId} from './types';
-import {containsRegion, edgeEndpoints, forceLayout, neighborhood, tracePath, type Neighborhood} from './graph';
+import {containsRegion, edgeEndpoints, forceLayout, neighborhood, parseRegionShape, relationOf, tracePath, type Neighborhood} from './graph';
 import {renderPropertyBuilder} from './property-builder';
+import {RESERVED_KEYS, propertyMessage} from './properties';
 import {detailSize} from './thumbnails';
 import {detached} from './dom';
 
@@ -14,7 +15,7 @@ interface TileLayer {canvas:HTMLCanvasElement;doc:Document;camera:Camera;width:n
 interface Drag {pointer:number;kind:'waiting'|'pan'|'image'|'region'|'ignore';start:Point;last:Point;screen:Point;origin:Camera;hit:Hit|null;imageId?:string;rect?:Rect;forcePan:boolean;forceMove:boolean}
 const clamp=(v:number,min:number,max:number)=>Math.max(min,Math.min(max,v));
 const copy=(r:Rect):Rect=>({x:r.x,y:r.y,width:r.width,height:r.height});
-const relation=(e:EdgeRecord)=>typeof e.properties.relation==='string'?e.properties.relation:'related to';
+const relation=(e:EdgeRecord)=>relationOf(e.properties)??'related to';
 const distance=(p:Point,a:Point,b:Point)=>{const dx=b.x-a.x,dy=b.y-a.y,t=clamp(((p.x-a.x)*dx+(p.y-a.y)*dy)/(dx*dx+dy*dy||1),0,1);return Math.hypot(p.x-a.x-t*dx,p.y-a.y-t*dy);};
 
 export class ImageGraphView extends ItemView {
@@ -277,21 +278,43 @@ export class ImageGraphView extends ItemView {
  private openInspector(){this.inspector.removeClass('is-hidden');this.renderInspector();}
  private renderInspector(){
   const ticket=++this.metadataTicket;for(const builder of this.propertyBuilders)builder.dispose();this.propertyBuilders=[];this.inspector.empty();const head=this.inspector.createDiv({cls:'image-graph-inspector-head'});head.createSpan({text:'Properties'});const close=head.createEl('button',{text:'×',attr:{'aria-label':'Close properties'}});close.onclick=()=>{this.metadataTicket++;this.inspector.addClass('is-hidden');};
-  const edge=this.snapshot.edges.find(e=>e.id===this.selectedEdge);if(edge){this.inspector.createEl('p',{text:`${this.describe(edge.source)} → ${this.describe(edge.target)}`});this.inspector.createEl('label',{text:'Arrow direction'});const select=this.inspector.createEl('select');for(const [value,text]of [['none','None'],['forward','Source → target'],['reverse','Source ← target'],['both','Both directions']])select.createEl('option',{attr:{value},text});select.value=edge.direction;this.inspector.createEl('p',{text:'Describe the connection in relation, for example “resembles”. This text appears beside the line.'});this.propertyEditor('Connection details',edge.properties,async props=>{if(typeof props.relation!=='string'||!props.relation.trim())throw new Error('Add a description to relation and choose the Text format.');await this.host.saveEdge({...edge,direction:select.value as Direction,properties:props});});return;}
-  const region=this.selectedRegion?this.regions.get(this.selectedRegion):undefined;if(region){this.inspector.createEl('label',{text:'Region label'});const label=this.inspector.createEl('input');label.value=region.label;const geometry=this.inspector.createEl('details');geometry.createEl('summary',{text:'Region geometry'});const shapeBuilder=renderPropertyBuilder(geometry,{...region.shape});this.propertyBuilders.push(shapeBuilder);this.propertyEditor('Region properties',region.properties,async props=>{await this.host.saveRegion({...region,label:label.value,shape:shapeBuilder.getValue() as unknown as RegionShape,properties:props});});return;}
+  const edge=this.snapshot.edges.find(e=>e.id===this.selectedEdge);if(edge){this.inspector.createEl('p',{text:`${this.describe(edge.source)} → ${this.describe(edge.target)}`});this.inspector.createEl('label',{text:'Arrow direction'});const select=this.inspector.createEl('select');for(const [value,text]of [['none','None'],['forward','Source → target'],['reverse','Source ← target'],['both','Both directions']])select.createEl('option',{attr:{value},text});select.value=edge.direction;this.inspector.createEl('p',{text:'Describe the connection in relation, for example “resembles”. This text appears beside the line.'});this.propertyEditor('Connection details',edge.properties,async props=>{if(!relationOf(props))throw new Error('Describe the connection in relation, as text, for example “resembles”.');await this.host.saveEdge({...edge,direction:select.value as Direction,properties:props});});return;}
+  const region=this.selectedRegion?this.regions.get(this.selectedRegion):undefined;if(region){this.inspector.createEl('label',{text:'Region label'});const label=this.inspector.createEl('input');label.value=region.label;const geometry=this.inspector.createEl('details');geometry.createEl('summary',{text:'Region geometry'});const shape=this.geometryEditor(geometry,region.shape);this.propertyEditor('Region properties',region.properties,async props=>{await this.host.saveRegion({...region,label:label.value,shape:shape.getShape(),properties:props});});return;}
   const imageId=[...this.selected][0],image=imageId?this.images.get(imageId):undefined;if(!image){this.inspector.createEl('p',{text:'Select an image, region, or connection.'});return;}this.inspector.createEl('p',{text:image.path});const open=this.inspector.createEl('button',{text:'Open companion note'});open.onclick=()=>this.run(()=>this.host.openCompanion(imageId));
   const loading=this.inspector.createEl('p',{text:'Loading properties…'});this.run(async()=>{const props=await this.host.readMetadata(imageId);if(!this.active||ticket!==this.metadataTicket)return;loading.remove();this.propertyEditor('Image details and tags',props,p=>this.host.saveMetadata(imageId,p));});
  }
+ /** Named fields for the one structured value an owner edits by hand, parsed rather than cast. */
+ private geometryEditor(parent:HTMLElement,shape:RegionShape):{getShape:()=>RegionShape}{
+  const number=(host:HTMLElement,caption:string,value:number)=>{
+   const field=host.createEl('label',{cls:'image-graph-property-field'});field.createSpan({text:caption});
+   const input=field.createEl('input',{attr:{type:'number',step:'0.001',min:'0',max:'1','aria-label':caption}});input.value=String(value);return input;
+  };
+  const read=(input:HTMLInputElement)=>input.value.trim()===''?Number.NaN:Number(input.value);
+  if(shape.type==='rect'){
+   const row=parent.createDiv({cls:'image-graph-property-row'});
+   const x=number(row,'x',shape.x),y=number(row,'y',shape.y),width=number(row,'Width',shape.width),height=number(row,'Height',shape.height);
+   parent.createEl('p',{cls:'image-graph-property-help',text:'Fractions of the image, measured from its top-left corner.'});
+   return {getShape:()=>parseRegionShape({type:'rect',x:read(x),y:read(y),width:read(width),height:read(height)})};
+  }
+  parent.createEl('p',{cls:'image-graph-property-help',text:'Corners as fractions of the image, in order.'});
+  const corners=shape.points.map((point,index)=>{const row=parent.createDiv({cls:'image-graph-property-row'});row.createSpan({text:`Corner ${index+1}`});return{x:number(row,'x',point.x),y:number(row,'y',point.y)};});
+  return {getShape:()=>parseRegionShape({type:'polygon',points:corners.map(corner=>({x:read(corner.x),y:read(corner.y)}))})};
+ }
  private propertyEditor(label:string,properties:Properties,save:(properties:Properties)=>Promise<void>){
   this.inspector.createEl('h4',{text:label});
-  const builder=renderPropertyBuilder(this.inspector,properties,{reservedKeys:label.startsWith('Image')?['image','image_graph_id']:[]});
-  this.propertyBuilders.push(builder);
   const feedback=this.inspector.createEl('p',{attr:{role:'status','aria-live':'polite'}});
+  // Each field reports itself as it is typed. Saving stays the boundary, not the first warning.
+  const report=(count:number)=>{feedback.textContent=count?`${count} ${count===1?'property needs':'properties need'} attention.`:'';};
+  const builder=renderPropertyBuilder(this.inspector,properties,{reservedKeys:label.startsWith('Image')?[...RESERVED_KEYS]:[],onChange:()=>report(0)});
+  this.propertyBuilders.push(builder);
+  this.inspector.insertBefore(feedback,this.inspector.lastElementChild);
   const button=this.inspector.createEl('button',{text:'Save properties'});
+  const recheck=()=>report(builder.check());
+  this.registerDomEvent(this.inspector,'input',recheck);this.registerDomEvent(this.inspector,'change',recheck);
   button.onclick=()=>{this.run(async()=>{
    feedback.textContent='';button.disabled=true;
    try{await save(builder.getValue());feedback.textContent='Properties saved.';new Notice('Properties saved.');this.schedule();}
-   catch(error){feedback.textContent=error instanceof Error?error.message:'Unable to save properties. Try again.';}
+   catch(error){const message=propertyMessage(error);feedback.textContent=message||'Unable to save properties. Try again.';builder.check();}
    finally{button.disabled=false;}
   });};
  }

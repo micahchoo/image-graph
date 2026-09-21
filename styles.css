@@ -56,3 +56,7 @@
 .image-graph-property-builder .image-graph-property-value>.image-graph-property-field{flex:1;min-width:70px}
 .image-graph-property-builder .image-graph-property-value>.image-graph-property-field:first-child{flex:0 0 120px}
 .image-graph-property-builder .image-graph-property-value input[type="checkbox"]{width:var(--checkbox-size,16px);height:var(--checkbox-size,16px);flex:none;align-self:flex-start}
+
+.image-graph-property-problem{grid-column:1/-1;font-size:var(--font-smaller);color:var(--text-error)}
+.image-graph-property-problem.is-hidden{display:none}
+.image-graph-inspector input[aria-invalid="true"],.image-graph-inspector select[aria-invalid="true"]{border-color:var(--text-error)}

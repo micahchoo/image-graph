@@ -9,10 +9,6 @@ export interface Neighborhood {
  capped: boolean;
 }
 
-const relationOf = (edge: EdgeRecord): string => {
- const value = edge.properties?.relation;
- return typeof value === 'string' ? value : '';
-};
 
 function endpoints(edge: EdgeRecord): string[] {
  return [edge.source.imageId, edge.target.imageId];
@@ -27,7 +23,7 @@ export function neighborhood(snapshot: {images: ImageRecord[]; edges: EdgeRecord
  const edgesByImage = new Map<string, EdgeRecord[]>();
  const imageIds = new Set(snapshot.images.map((image) => image.id));
  for (const edge of snapshot.edges) {
-  if (relationFilter !== '' && relationOf(edge) !== relationFilter) continue;
+  if (relationFilter !== '' && (relationOf(edge.properties) ?? '') !== relationFilter) continue;
   const [a, b] = endpoints(edge);
   if (!imageIds.has(a) || !imageIds.has(b)) continue;
   (edgesByImage.get(a) ?? (edgesByImage.set(a, []), edgesByImage.get(a)!)).push(edge);
@@ -52,7 +48,7 @@ export function neighborhood(snapshot: {images: ImageRecord[]; edges: EdgeRecord
   }
  }
  const included = new Set(ids);
- const resultEdges = snapshot.edges.filter((edge) => included.has(edge.source.imageId) && included.has(edge.target.imageId) && (relationFilter === '' || relationOf(edge) === relationFilter));
+ const resultEdges = snapshot.edges.filter((edge) => included.has(edge.source.imageId) && included.has(edge.target.imageId) && (relationFilter === '' || (relationOf(edge.properties) ?? '') === relationFilter));
  return {ids, edges: resultEdges, distances, parents, capped};
 }
 
@@ -218,6 +214,47 @@ export function edgeEndpoints(edge: EdgeRecord, images: Map<string, Rect>, regio
  const sourceCenter = endpointPosition(edge.source, images, regions);
  const targetCenter = endpointPosition(edge.target, images, regions);
  return {source: endpointBoundary(edge.source, targetCenter, images, regions), target: endpointBoundary(edge.target, sourceCenter, images, regions)};
+}
+
+const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+const unit = (value: unknown): value is number => finite(value) && value >= 0 && value <= 1;
+
+/**
+ * Narrow an unknown value to a region shape, naming the field that is wrong.
+ *
+ * The geometry panel used to hand its value straight to `saveRegion` behind a double cast,
+ * so the compiler could not see the one structured value an owner types by hand. This is the
+ * single definition; storage and the panel both come through here.
+ */
+/** The one definition of a usable relation: the label a connection shows, or nothing. */
+export function relationOf(properties: unknown): string | null {
+ if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return null;
+ const value = (properties as Record<string, unknown>).relation;
+ return typeof value === 'string' && value.trim() ? value : null;
+}
+
+export function parseRegionShape(value: unknown): RegionShape {
+ if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('A region needs a shape.');
+ const shape = value as Record<string, unknown>;
+ if (shape.type === 'rect') {
+  for (const key of ['x', 'y', 'width', 'height'] as const) if (!finite(shape[key])) throw new Error(`Enter a number for ${key}.`);
+  const {x, y, width, height} = shape as {x: number; y: number; width: number; height: number};
+  if (!unit(x) || !unit(y)) throw new Error('Keep x and y between 0 and 1; they are fractions of the image.');
+  if (width <= 0 || height <= 0) throw new Error('Give the rectangle a width and height above 0.');
+  if (x + width > 1.000001 || y + height > 1.000001) throw new Error('Keep the rectangle inside the image: x plus width, and y plus height, cannot pass 1.');
+  return {type: 'rect', x, y, width, height};
+ }
+ if (shape.type === 'polygon') {
+  const points = shape.points;
+  if (!Array.isArray(points)) throw new Error('A polygon needs a list of points.');
+  if (points.length < 3) throw new Error('Choose at least three polygon corners.');
+  return {type: 'polygon', points: points.map((point, index) => {
+   const p = point as Record<string, unknown> | null;
+   if (!p || typeof p !== 'object' || !unit(p.x) || !unit(p.y)) throw new Error(`Give corner ${index + 1} an x and y between 0 and 1.`);
+   return {x: p.x, y: p.y};
+  })};
+ }
+ throw new Error('Choose either a rectangle or a polygon.');
 }
 
 export function containsRegion(point: Point, shape: RegionShape): boolean {

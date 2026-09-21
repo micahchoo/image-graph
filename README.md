@@ -108,7 +108,7 @@ Their properties identify them as examples.
 
 See [the storage guide](docs/guide.md) for file locations and recovery behavior.
 See [workflow recordings](docs/workflows/README.md) for each workflow as a separate clip with its written steps.
-See [development contracts](docs/DEVELOPMENT.md) to build from source.
+See [development contracts](docs/DEVELOPMENT.md) to build from source, and [rendering performance](docs/PERFORMANCE.md) for measured frame costs.
 Physical mobile testing and multi-device conflict testing remain separate from desktop verification.
 
 ## Credits and license

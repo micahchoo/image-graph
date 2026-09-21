@@ -55,6 +55,13 @@ The stylesheet is now one file. `property-builder.css` was merged into `styles.c
 
 `minAppVersion` is 1.8.7. The Obsidian APIs used are `Plugin`, `ItemView`, `Menu`, `Notice`, `TFile`, `TFolder`, `parseYaml`, `normalizePath`, and the `vault`, `workspace`, and `fileManager` calls listed in the source; all predate that version. No Node or Electron module is imported, which is what `isDesktopOnly: false` rests on.
 
+## Rendering performance
+
+Whole-vault panning went from 14.9 fps to 59.9 fps, and a connection loop that culled nothing went from 19.3 ms to 1.5 ms at 20,000 edges.
+Atlas page retention is now bounded at 96 MB instead of growing with the vault.
+Evidence, method and remaining limits: [rendering performance](PERFORMANCE.md).
+The cached tile layer was compared against the direct path pixel by pixel: maximum channel difference 4 of 255.
+
 ## Limits
 
 Physical mobile interaction and multi-device synchronization remain unverified.

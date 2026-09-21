@@ -4,11 +4,13 @@ import {newId} from './types';
 import {containsRegion, edgeEndpoints, forceLayout, neighborhood, tracePath, type Neighborhood} from './graph';
 import {renderPropertyBuilder} from './property-builder';
 import {detailSize} from './thumbnails';
+import {detached} from './dom';
 
 export const VIEW_TYPE='image-graph-view';
 type Hit={endpoint:Endpoint}|{edge:EdgeRecord};
 type Mode='select'|'rect'|'polygon'|'connect'|'move';
 interface Exploration {root:string;depth:number;filter:string;expanded:Set<string>;pinned:Set<string>;graph:Neighborhood;positions:Map<string,Rect>;savedCamera:Camera}
+interface TileLayer {canvas:HTMLCanvasElement;camera:Camera;width:number;height:number;ratio:number;positions:Map<string,Rect>;version:number}
 interface Drag {pointer:number;kind:'waiting'|'pan'|'image'|'region'|'ignore';start:Point;last:Point;screen:Point;origin:Camera;hit:Hit|null;imageId?:string;rect?:Rect;forcePan:boolean;forceMove:boolean}
 const clamp=(v:number,min:number,max:number)=>Math.max(min,Math.min(max,v));
 const copy=(r:Rect):Rect=>({x:r.x,y:r.y,width:r.width,height:r.height});
@@ -52,8 +54,12 @@ export class ImageGraphView extends ItemView {
  private observer:ResizeObserver|null=null;
  private metadataTicket=0;
  private unsubscribe:(()=>void)|null=null;
- private stats={visible:0,drawMs:0};
- private redraw=()=>this.schedule();
+ private stats={visible:0,drawMs:0,frameMs:0};
+ private lastDraw=0;
+ private layer:TileLayer|null=null;
+ private layerVersion=0;
+ // A thumbnail arriving changes what the cached layer should show; a redraw alone would keep the old one.
+ private redraw=()=>{this.layerVersion++;this.schedule();};
  constructor(leaf:WorkspaceLeaf,private readonly host:GraphHost){super(leaf);}
  getViewType(){return VIEW_TYPE;}
  getDisplayText(){return 'Image graph';}
@@ -100,7 +106,7 @@ export class ImageGraphView extends ItemView {
   this.observer=new ResizeObserver(()=>{const ratio=this.win.devicePixelRatio||1;this.canvas.width=Math.max(1,Math.round(this.canvas.clientWidth*ratio));this.canvas.height=Math.max(1,Math.round(this.canvas.clientHeight*ratio));if(!this.initialized&&this.images.size){this.initialized=true;this.fit();}this.schedule();});this.observer.observe(stage);
   this.unsubscribe=this.host.subscribe(()=>this.refresh());this.refresh();
  }
- async onClose():Promise<void>{this.active=false;this.metadataTicket++;this.clearLongPress();this.win.clearTimeout(this.zoomTimer);for(const builder of this.propertyBuilders)builder.dispose();this.propertyBuilders=[];this.unsubscribe?.();this.unsubscribe=null;this.observer?.disconnect();this.observer=null;this.win.cancelAnimationFrame(this.raf);this.raf=0;this.pointers.clear();}
+ async onClose():Promise<void>{this.active=false;this.metadataTicket++;this.clearLongPress();this.win.clearTimeout(this.zoomTimer);for(const builder of this.propertyBuilders)builder.dispose();this.propertyBuilders=[];this.unsubscribe?.();this.unsubscribe=null;this.observer?.disconnect();this.observer=null;this.win.cancelAnimationFrame(this.raf);this.raf=0;this.pointers.clear();this.layer=null;}
  private refresh(){
   if(!this.active)return;this.snapshot=this.host.getSnapshot();this.images=new Map(this.snapshot.images.map(i=>[i.id,i]));this.regions=new Map(this.snapshot.regions.map(r=>[r.id,r]));this.regionsByImage.clear();
   for(const r of this.snapshot.regions){const list=this.regionsByImage.get(r.imageId)??[];list.push(r);this.regionsByImage.set(r.imageId,list);}
@@ -116,17 +122,28 @@ export class ImageGraphView extends ItemView {
  private draw(){
   const ctx=this.canvas.getContext('2d');if(!ctx)return;const start=performance.now(),w=this.canvas.clientWidth,h=this.canvas.clientHeight,ratio=this.win.devicePixelRatio||1;
   const css=this.win.getComputedStyle(this.contentEl),bg=css.getPropertyValue('--background-primary').trim()||'#181b20',card=css.getPropertyValue('--background-secondary').trim()||'#333840',fg=css.getPropertyValue('--text-normal').trim()||'#ddd',accent=css.getPropertyValue('--interactive-accent').trim()||'#7bbda8';
-  ctx.setTransform(ratio,0,0,ratio,0,0);ctx.fillStyle=bg;ctx.fillRect(0,0,w,h);ctx.save();ctx.translate(this.camera.x,this.camera.y);ctx.scale(this.camera.scale,this.camera.scale);const s=this.camera.scale;let visible=0;
-  if(this.mode==='move'&&!this.exploration&&40*s>=12){const left=Math.floor(-this.camera.x/s/40)*40,top=Math.floor(-this.camera.y/s/40)*40;ctx.beginPath();let points=0;for(let x=left;x<(w-this.camera.x)/s&&points<20000;x+=40)for(let y=top;y<(h-this.camera.y)/s&&points<20000;y+=40){ctx.moveTo(x+1/s,y);ctx.arc(x,y,1/s,0,Math.PI*2);points++;}ctx.fillStyle=fg;ctx.globalAlpha=.2;ctx.fill();ctx.globalAlpha=1;}
+  ctx.setTransform(ratio,0,0,ratio,0,0);ctx.fillStyle=bg;ctx.fillRect(0,0,w,h);const s=this.camera.scale;let visible=0;
   // Limit demand as well as cache size: otherwise a dense viewport can repeatedly
   // evict and re-request its own thumbnails on every completion redraw.
-  const detailed=this.shownIds().filter(id=>{const r=this.positions.get(id);return r&&r.width*s>=32&&this.visible(r,w,h);});
+  const detailed:string[]=[];
+  for(const id of this.shownIds()){const r=this.positions.get(id);if(!r||!this.visible(r,w,h))continue;visible++;if(r.width*s>=32)detailed.push(id);}
   const center={x:(w/2-this.camera.x)/s,y:(h/2-this.camera.y)/s};
   if(detailed.length>120)detailed.sort((a,b)=>{const ar=this.positions.get(a)!,br=this.positions.get(b)!;return Math.hypot(ar.x+ar.width/2-center.x,ar.y+ar.height/2-center.y)-Math.hypot(br.x+br.width/2-center.x,br.y+br.height/2-center.y);});
   const thumbnailIds=new Set<string>();let detailBytes=0;
   for(const id of detailed){const r=this.positions.get(id)!,size=detailSize(Math.max(r.width,r.height)*s*ratio);if(detailBytes+size*size*4>64*1024*1024||thumbnailIds.size>=120)continue;thumbnailIds.add(id);detailBytes+=size*size*4;}
-  for(const id of this.shownIds()){
-   const image=this.images.get(id),r=this.positions.get(id);if(!image||!r||!this.visible(r,w,h))continue;visible++;
+  // Below the detail threshold every image is one atlas tile, so a bitmap of the viewport
+  // and its margin stands in for tens of thousands of draw calls while the camera pans.
+  const layer=!detailed.length&&!this.zoomCursor&&!this.pinch&&this.drag?.kind!=='image'?this.tileLayer(w,h,ratio,card,bg):null;
+  // Blit in device pixels: a fractional offset would resample the whole mosaic and soften it.
+  if(layer){ctx.setTransform(1,0,0,1,0,0);ctx.drawImage(layer.canvas,Math.round((this.camera.x-layer.camera.x)*ratio),Math.round((this.camera.y-layer.camera.y)*ratio));ctx.setTransform(ratio,0,0,ratio,0,0);}
+  ctx.save();ctx.translate(this.camera.x,this.camera.y);ctx.scale(this.camera.scale,this.camera.scale);
+  if(this.mode==='move'&&!this.exploration&&40*s>=12){const left=Math.floor(-this.camera.x/s/40)*40,top=Math.floor(-this.camera.y/s/40)*40;ctx.beginPath();let points=0;for(let x=left;x<(w-this.camera.x)/s&&points<20000;x+=40)for(let y=top;y<(h-this.camera.y)/s&&points<20000;y+=40){ctx.moveTo(x+1/s,y);ctx.arc(x,y,1/s,0,Math.PI*2);points++;}ctx.fillStyle=fg;ctx.globalAlpha=.2;ctx.fill();ctx.globalAlpha=1;}
+  // Rings stay live so a selection never rebuilds the layer. Labels need 60 screen pixels
+  // of image width, which no image reaches while the layer is in use.
+  if(layer){const ringed=new Set(this.selected);if(this.exploration)ringed.add(this.exploration.root);
+   for(const id of ringed){const r=this.positions.get(id);if(!r||!this.visible(r,w,h))continue;ctx.strokeStyle=this.selected.has(id)?'#ffe0a0':accent;ctx.lineWidth=2/s;ctx.strokeRect(r.x,r.y,r.width,r.height);}
+  }else for(const id of this.shownIds()){
+   const image=this.images.get(id),r=this.positions.get(id);if(!image||!r||!this.visible(r,w,h))continue;
    ctx.fillStyle=image.missing?'#733c43':card;ctx.fillRect(r.x,r.y,r.width,r.height);
    const thumb=thumbnailIds.has(id)?this.host.thumbnail(image,this.redraw,Math.max(r.width,r.height)*s*ratio):null;
    if(thumb)ctx.drawImage(thumb,r.x,r.y,r.width,r.height);
@@ -137,7 +154,8 @@ export class ImageGraphView extends ItemView {
   if(s>.06)for(const region of this.snapshot.regions){const r=this.positions.get(region.imageId);if(!r||!this.visible(r,w,h))continue;ctx.strokeStyle=region.id===this.selectedRegion?'#ffe0a0':'#69dfb0';ctx.lineWidth=(region.id===this.selectedRegion?3:1.5)/s;this.shape(ctx,r,region.shape);ctx.stroke();}
   const steps=this.path(),highlight=new Set(steps.map(step=>step.edge.id)),filter=this.exploration?.filter??'';
   for(const edge of this.shownEdges()){
-   if(!this.positions.has(edge.source.imageId)||!this.positions.has(edge.target.imageId))continue;
+   const source=this.positions.get(edge.source.imageId),target=this.positions.get(edge.target.imageId);
+   if(!source||!target||!this.spans(source,target,w,h))continue;
    const{source:a,target:b}=edgeEndpoints(edge,this.positions,this.regions),bright=edge.id===this.selectedEdge||highlight.has(edge.id);
    const matches=!filter||relation(edge)===filter;
    ctx.globalAlpha=filter&&!matches?.12:highlight.size&&!bright?.22:1;ctx.strokeStyle=ctx.fillStyle=bright?'#ffe0a0':accent;ctx.lineWidth=(bright||filter&&matches?3:1.4)/s;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
@@ -146,7 +164,7 @@ export class ImageGraphView extends ItemView {
   }ctx.globalAlpha=1;
   if(this.drag?.kind==='region'&&this.drag.imageId){const r=this.positions.get(this.drag.imageId);if(r){const shape=this.rectangle(this.drag.start,this.drag.last,r);ctx.strokeStyle='#ffe0a0';ctx.lineWidth=2/s;this.shape(ctx,r,shape);ctx.stroke();}}
   if(this.polygon){const r=this.positions.get(this.polygon.imageId);if(r){ctx.strokeStyle='#ffe0a0';ctx.lineWidth=2/s;this.shape(ctx,r,{type:'polygon',points:this.polygon.points});ctx.stroke();for(const [index,p]of this.polygon.points.entries()){ctx.beginPath();ctx.arc(r.x+p.x*r.width,r.y+p.y*r.height,(index===0?6:4)/s,0,Math.PI*2);ctx.fillStyle=index===0?'#69dfb0':'#ffe0a0';ctx.fill();}}}
-  ctx.restore();this.stats={visible,drawMs:performance.now()-start};
+  ctx.restore();this.stats={visible,drawMs:performance.now()-start,frameMs:this.lastDraw?start-this.lastDraw:0};this.lastDraw=start;
   const ex=this.exploration;this.explorationControls.toggleClass('is-hidden',!ex);
   this.drawingControls.toggleClass('is-hidden',this.mode!=='polygon');this.finishButton.disabled=(this.polygon?.points.length??0)<3;
   this.canvas.dataset.mode=this.drag?.kind==='pan'?'panning':this.zoomCursor??this.mode;
@@ -154,8 +172,39 @@ export class ImageGraphView extends ItemView {
   this.status.setText(`${ex?`${ex.graph.ids.length} connected / `:''}${this.images.size.toLocaleString()} images · ${visible.toLocaleString()} visible · ${this.mode==='select'?'Drag to pan · M moves images · right click / long press for actions':this.mode==='move'?'Drag an image to move · whole-vault positions snap to the 40px grid · Escape to pan':this.mode==='connect'?(this.pending?'Choose target':'Choose source'):`Draw ${this.mode}`} ${ex?.graph.capped?'· Neighborhood limit: 150':''}${filter?` · ${this.shownEdges().filter(e=>relation(e)===filter).length} matching links; context dimmed`:''}${progress.ready<progress.total?` · Overview thumbnails ${progress.ready.toLocaleString()}/${progress.total.toLocaleString()}`:''}`);
   this.pathText.toggleClass('is-hidden',!ex);if(ex){const target=[...this.selected][0];this.pathText.setText(target&&target!==ex.root&&steps.length?`One shortest path · ${steps.length} hops\n`+steps.map(step=>{const e=step.edge,forward=e.source.imageId===step.from,from=forward?e.source:e.target,to=forward?e.target:e.source,arrow=e.direction==='both'?'↔':e.direction==='none'?'—':(e.direction==='forward')===forward?'→':'←';return `${this.describe(from)} ${arrow} ${relation(e)} ${arrow} ${this.describe(to)}`;}).join('\n'):'Starting image anchored · select an image to trace its path. Links can be traversed either way.');}
  }
+ /** Atlas tiles for the whole shown set, rendered once into a bitmap that covers the viewport
+  * and a margin. Reused until the scale, the data, or the camera leaves that margin. Selection
+  * rings and labels stay outside it so a click never rebuilds it. */
+ private tileLayer(w:number,h:number,ratio:number,card:string,bg:string):TileLayer|null{
+  const margin=Math.round(Math.min(w,h)*.25*ratio)/ratio,width=w+margin*2,height=h+margin*2,current=this.layer;
+  if(current&&current.ratio===ratio&&current.width===width&&current.height===height&&current.camera.scale===this.camera.scale&&current.positions===this.positions&&current.version===this.layerVersion){
+   const dx=this.camera.x-current.camera.x,dy=this.camera.y-current.camera.y;
+   if(dx<=0&&dy<=0&&dx+width>=w&&dy+height>=h)return current;
+  }
+  const canvas=current?.canvas??detached(this.contentEl.ownerDocument,'canvas');
+  canvas.width=Math.max(1,Math.round(width*ratio));canvas.height=Math.max(1,Math.round(height*ratio));
+  const ctx=canvas.getContext('2d');if(!ctx)return null;
+  const camera:Camera={scale:this.camera.scale,x:this.camera.x+margin,y:this.camera.y+margin};
+  ctx.setTransform(ratio,0,0,ratio,0,0);ctx.fillStyle=bg;ctx.fillRect(0,0,width,height);ctx.translate(camera.x,camera.y);ctx.scale(camera.scale,camera.scale);
+  for(const id of this.shownIds()){
+   const image=this.images.get(id),r=this.positions.get(id);if(!image||!r||!this.visible(r,width,height,camera))continue;
+   ctx.fillStyle=image.missing?'#733c43':card;ctx.fillRect(r.x,r.y,r.width,r.height);
+   const tile=this.host.overviewThumbnail(image,this.redraw);
+   if(tile)ctx.drawImage(tile.source,tile.x,tile.y,tile.width,tile.height,r.x,r.y,r.width,r.height);
+  }
+  this.layer={canvas,camera,width,height,ratio,positions:this.positions,version:this.layerVersion};
+  return this.layer;
+ }
  private shape(ctx:CanvasRenderingContext2D,r:Rect,shape:RegionShape){ctx.beginPath();if(shape.type==='rect')ctx.rect(r.x+shape.x*r.width,r.y+shape.y*r.height,shape.width*r.width,shape.height*r.height);else{shape.points.forEach((p,i)=>{if(i)ctx.lineTo(r.x+p.x*r.width,r.y+p.y*r.height);else ctx.moveTo(r.x+p.x*r.width,r.y+p.y*r.height);});if(shape.points.length>2)ctx.closePath();}}
- private visible(r:Rect,w:number,h:number){const x=r.x*this.camera.scale+this.camera.x,y=r.y*this.camera.scale+this.camera.y;return x<=w&&y<=h&&x+r.width*this.camera.scale>=0&&y+r.height*this.camera.scale>=0;}
+ private visible(r:Rect,w:number,h:number,camera:Camera=this.camera){const x=r.x*camera.scale+camera.x,y=r.y*camera.scale+camera.y;return x<=w&&y<=h&&x+r.width*camera.scale>=0&&y+r.height*camera.scale>=0;}
+ /** A connection's endpoints sit inside its two image rectangles, so their union bounds the line.
+  * The margin keeps a midpoint label that overhangs the viewport, without drawing every distant edge. */
+ private spans(a:Rect,b:Rect,w:number,h:number){
+  const s=this.camera.scale,margin=240;
+  const left=Math.min(a.x,b.x)*s+this.camera.x,top=Math.min(a.y,b.y)*s+this.camera.y;
+  const right=Math.max(a.x+a.width,b.x+b.width)*s+this.camera.x,bottom=Math.max(a.y+a.height,b.y+b.height)*s+this.camera.y;
+  return left<=w+margin&&top<=h+margin&&right>=-margin&&bottom>=-margin;
+ }
  private world(event:{clientX:number;clientY:number}):Point{const r=this.canvas.getBoundingClientRect();return{x:(event.clientX-r.left-this.camera.x)/this.camera.scale,y:(event.clientY-r.top-this.camera.y)/this.camera.scale};}
  private endpointAt(p:Point):Endpoint|null{const ids=this.shownIds();for(let i=ids.length-1;i>=0;i--){const id=ids[i],r=this.positions.get(id);if(!r||p.x<r.x||p.x>r.x+r.width||p.y<r.y||p.y>r.y+r.height)continue;const normalized={x:(p.x-r.x)/r.width,y:(p.y-r.y)/r.height};for(const region of [...(this.regionsByImage.get(id)??[])].reverse())if(containsRegion(normalized,region.shape))return{imageId:id,regionId:region.id};return{imageId:id};}return null;}
  private hit(p:Point):Hit|null{const endpoint=this.endpointAt(p);if(endpoint?.regionId)return{endpoint};for(const edge of [...this.shownEdges()].reverse()){const{source:a,target:b}=edgeEndpoints(edge,this.positions,this.regions);if(distance(p,a,b)*this.camera.scale<7)return{edge};}return endpoint?{endpoint}:null;}
@@ -194,7 +243,7 @@ export class ImageGraphView extends ItemView {
    if(this.mode==='connect'&&drag.hit&&'endpoint'in drag.hit)this.connect(drag.hit.endpoint);
    else if(this.mode==='polygon'&&drag.hit&&'endpoint'in drag.hit){const imageId=drag.hit.endpoint.imageId,r=this.positions.get(imageId)!;if(!this.polygon)this.polygon={imageId,points:[]};if(this.polygon.imageId===imageId){const p=this.world(event),point={x:clamp((p.x-r.x)/r.width,0,1),y:clamp((p.y-r.y)/r.height,0,1)},first=this.polygon.points[0],last=this.polygon.points.at(-1);if(first&&this.polygon.points.length>=3&&Math.hypot((point.x-first.x)*r.width,(point.y-first.y)*r.height)*this.camera.scale<10)this.finishPolygon();else if(!last||Math.hypot((point.x-last.x)*r.width,(point.y-last.y)*r.height)*this.camera.scale>3)this.polygon.points.push(point);this.selected=new Set([imageId]);}}
    else this.select(drag.hit,event.shiftKey);
-  }else if(drag.kind==='image'&&drag.imageId&&!this.exploration){const image=this.images.get(drag.imageId),r=this.positions.get(drag.imageId);if(image&&r)this.run(()=>this.host.updateImage({...image,...r}));}
+  }else if(drag.kind==='image'&&drag.imageId){this.layerVersion++;if(!this.exploration){const image=this.images.get(drag.imageId),r=this.positions.get(drag.imageId);if(image&&r)this.run(()=>this.host.updateImage({...image,...r}));}}
   else if(drag.kind==='region'&&drag.imageId){const r=this.positions.get(drag.imageId)!;const shape=this.rectangle(drag.start,drag.last,r);if(shape.width*r.width*this.camera.scale>4&&shape.height*r.height*this.camera.scale>4)this.createRegion(drag.imageId,shape);}
   this.schedule();
  }

@@ -41,8 +41,23 @@ Drags, wheel zooms, typing, and a depth-control key press all used trusted input
 The clips show desktop mouse behavior only. They do not establish touch, stylus, or mobile behavior.
 Earlier pan and polygon recordings failed review and remain excluded from the documentation.
 
+## Release 0.1.0
+
+`npm ci` installed the locked graph without changing it under npm 10.9.9 and npm 11.16.0.
+`npm run release:verify` passed on both: lint, TypeScript, 36 Vitest tests, 4 release tests, the production build, and an asset check that allows exactly `main.js`, `manifest.json`, and `styles.css`.
+CI repeated both legs on Node 22 and the release workflow repeated them again at the tag.
+
+The three published assets are byte-identical to the locally built ones, so the build reproduced across machines.
+`gh attestation verify` accepted each against a SLSA provenance statement from `release.yml` in this repository.
+Reinstalling the downloaded files in the development vault loaded version 0.1.0 with no errors and a computed view padding of `0px`, which is the scoped selector that replaced an `!important`.
+
+The stylesheet is now one file. `property-builder.css` was merged into `styles.css` and the build copies it unchanged, so a stale build is a checked mismatch rather than a silent difference.
+
+`minAppVersion` is 1.8.7. The Obsidian APIs used are `Plugin`, `ItemView`, `Menu`, `Notice`, `TFile`, `TFolder`, `parseYaml`, `normalizePath`, and the `vault`, `workspace`, and `fileManager` calls listed in the source; all predate that version. No Node or Electron module is imported, which is what `isDesktopOnly: false` rests on.
+
 ## Limits
 
 Physical mobile interaction and multi-device synchronization remain unverified.
+`isDesktopOnly: false` rests on the absence of desktop-only imports, not on a device test.
 Tests with generated images do not establish performance for every image format, file size, or graph density.
 An earlier workstation crash has no confirmed attribution to Obsidian or this plugin.

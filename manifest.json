@@ -1,0 +1,10 @@
+{
+  "id": "image-graph",
+  "name": "Image Graph",
+  "version": "0.1.0",
+  "minAppVersion": "1.8.7",
+  "description": "Explore and connect images and their regions in your vault.",
+  "author": "Micah",
+  "fundingUrl": "https://github.com/sponsors/micahchoo",
+  "isDesktopOnly": false
+}

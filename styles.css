@@ -1,0 +1,58 @@
+.workspace-leaf-content .view-content.image-graph-view{height:100%;width:100%;overflow:hidden;color:var(--text-normal);padding:0}
+.image-graph-root,.image-graph-body{height:100%;display:flex;flex-direction:column;min-height:0}
+.image-graph-toolbar{display:flex;gap:6px;align-items:center;padding:6px 8px;border-bottom:1px solid var(--background-modifier-border);background:var(--background-primary);z-index:2}
+.image-graph-toolbar button,.image-graph-inspector button{font:var(--font-ui-small);border:1px solid var(--background-modifier-border);border-radius:var(--radius-s);padding:4px 8px;background:var(--interactive-normal);color:var(--text-normal);cursor:pointer}
+.image-graph-toolbar button:hover,.image-graph-inspector button:hover{background:var(--interactive-hover)}
+.image-graph-body{position:relative;flex:1;overflow:hidden}
+.image-graph-stage{position:absolute;inset:0;background:var(--background-primary);touch-action:none}
+.image-graph-canvas{display:block;width:100%;height:100%;cursor:grab}
+.image-graph-canvas:active{cursor:grabbing}
+.image-graph-inspector{position:absolute;right:12px;top:12px;width:min(300px,calc(100% - 24px));max-height:calc(100% - 24px);overflow:auto;padding:10px;background:var(--background-primary-alt);border:1px solid var(--background-modifier-border);border-radius:var(--radius-m);box-shadow:var(--shadow-s);z-index:3}
+.image-graph-inspector.is-hidden{display:none}
+.image-graph-inspector-head{display:flex;align-items:center;justify-content:space-between;font-weight:var(--font-semibold);margin-bottom:10px}
+.image-graph-inspector-head button{border:0;background:transparent;font-size:18px;padding:0 4px}
+.image-graph-inspector-title{font-size:var(--font-ui-small);word-break:break-word;margin-bottom:8px;color:var(--text-muted)}
+.image-graph-inspector-actions{display:flex;gap:6px;margin-bottom:10px}
+.image-graph-meta-loading textarea{box-sizing:border-box;width:100%;resize:vertical;font:var(--font-monospace);font-size:var(--font-smaller);margin-bottom:6px}
+.image-graph-meta-loading button{display:block}
+.image-graph-empty-inspector{color:var(--text-muted);font-size:var(--font-ui-small)}
+@media(max-width:600px){.image-graph-inspector{top:auto;bottom:8px;right:8px;width:calc(100% - 16px);max-height:45%}.image-graph-toolbar{overflow-x:auto;white-space:nowrap}}
+.image-graph-exploration{display:flex;align-items:center;gap:8px;padding:6px 10px;flex-wrap:wrap;border-bottom:1px solid var(--background-modifier-border)}
+.image-graph-exploration.is-hidden,.image-graph-path.is-hidden{display:none}
+.image-graph-exploration select{max-width:180px}
+.image-graph-status{position:absolute;bottom:8px;left:10px;right:10px;pointer-events:none;font-size:12px;color:var(--text-muted);background:var(--background-primary);padding:4px 6px}
+.image-graph-path{position:absolute;bottom:44px;left:10px;max-width:min(650px,calc(100% - 20px));max-height:27%;overflow:auto;white-space:pre-line;font-size:12px;padding:8px 10px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-primary-alt);opacity:.94}
+.image-graph-inspector label{display:block;margin:12px 0 5px}
+.image-graph-inspector textarea{display:block;box-sizing:border-box;width:100%;resize:vertical;min-height:130px;font-family:var(--font-monospace);font-size:13px;margin:6px 0}
+.image-graph-inspector input,.image-graph-inspector select{width:100%}
+.image-graph-canvas{touch-action:none}
+.image-graph-canvas:focus-visible{outline:1px solid var(--interactive-accent);outline-offset:-2px}
+.image-graph-canvas[data-mode="select"]{cursor:grab}
+.image-graph-canvas[data-mode="panning"]{cursor:grabbing}
+.image-graph-canvas[data-mode="move"]{cursor:move}
+.image-graph-canvas[data-mode="rect"],.image-graph-canvas[data-mode="polygon"]{cursor:crosshair}
+.image-graph-canvas[data-mode="connect"]{cursor:copy}
+.image-graph-canvas[data-mode="zoom-in"]{cursor:zoom-in}
+.image-graph-canvas[data-mode="zoom-out"]{cursor:zoom-out}
+.image-graph-drawing-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;background:var(--background-secondary);font-size:var(--font-ui-small)}
+.image-graph-drawing-controls.is-hidden{display:none}
+.image-graph-inspector{width:min(390px,calc(100% - 24px))}
+.image-graph-inspector details{margin:10px 0}
+.image-graph-inspector details summary{cursor:pointer}
+
+.image-graph-property-builder { display: flex; flex-direction: column; gap: 0.5em; }
+.image-graph-property-help { margin: 0; color: var(--text-muted); }
+.image-graph-property-builder .image-graph-property-field { display: flex; flex-direction: column; gap: 0.2em; min-width: 8em; margin: 0; }
+.image-graph-property-field > span, .image-graph-property-content-label { font-size: var(--font-small); color: var(--text-muted); }
+.image-graph-property-row { display: flex; align-items: flex-start; gap: 0.4em; flex-wrap: wrap; }
+.image-graph-property-row > .image-graph-property-field { min-width: 8em; }
+.image-graph-property-value { display: flex; gap: 0.4em; align-items: flex-start; flex: 1; }
+.image-graph-property-children, .image-graph-property-list { display: flex; flex-direction: column; gap: 0.35em; flex: 1 1 100%; padding-inline-start: 1em; border-inline-start: 2px solid var(--background-modifier-border); }
+.image-graph-property-list-item { display: flex; gap: 0.4em; align-items: flex-start; }
+.image-graph-property-builder .image-graph-property-row{display:grid;grid-template-columns:minmax(0,1fr) auto;padding:8px 0;border-bottom:1px solid var(--background-modifier-border)}
+.image-graph-property-builder .image-graph-property-row>.image-graph-property-field{grid-column:1;grid-row:1;min-width:0}
+.image-graph-property-builder .image-graph-property-row>.image-graph-property-value{grid-column:1/-1;grid-row:2;min-width:0;flex-wrap:wrap}
+.image-graph-property-builder .image-graph-property-row>button{grid-column:2;grid-row:1;font-size:11px;padding:3px 5px}
+.image-graph-property-builder .image-graph-property-value>.image-graph-property-field{flex:1;min-width:70px}
+.image-graph-property-builder .image-graph-property-value>.image-graph-property-field:first-child{flex:0 0 120px}
+.image-graph-property-builder .image-graph-property-value input[type="checkbox"]{width:var(--checkbox-size,16px);height:var(--checkbox-size,16px);flex:none;align-self:flex-start}

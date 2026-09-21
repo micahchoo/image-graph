@@ -24,12 +24,14 @@ class NotePicker extends FuzzySuggestModal<TFile>{
  onClose(){super.onClose();window.setTimeout(()=>{if(!this.chosen)this.answer(null);},0);}
 }
 import {exploreSize} from './layout';
+import {isCatalogImage} from './catalog';
 import {extractionPath, findExtractionPosition, regionCrop} from './extraction';
 import {detached} from './dom';
 import {overlaps} from './geometry';
 import {type Attachment, type GraphHost, type ImageRecord, type RegionRecord, type EdgeRecord, type Properties, type ViewFrame} from './types';
 
-const isImage=(path:string)=>/\.(png|jpe?g|webp|gif|bmp|avif|svg)$/i.test(path);
+/** One answer to what is an image: the catalog's. A TIFF the catalog held was refused here until 2026-09-21. */
+const isImage=isCatalogImage;
 const errorMessage=(error:unknown)=>error instanceof Error?error.message:String(error);
 
 export default class ImageGraphPlugin extends Plugin implements GraphHost {
@@ -255,7 +257,7 @@ export default class ImageGraphPlugin extends Plugin implements GraphHost {
   for(const extracted of snapshot.images){
    if(!extracted.path.startsWith(`${EXTRACTED_ROOT}/`)||!extracted.metadataPath)continue;
    const companion=this.app.vault.getAbstractFileByPath(extracted.metadataPath);if(!(companion instanceof TFile))continue;
-   let frontmatter:unknown;try{const text=await this.app.vault.read(companion),match=text.match(/^---\s*\n([\s\S]*?)\n---(?:\s*\n|$)/);frontmatter=match?parseYaml(match[1]):undefined;}catch{continue;}
+   let frontmatter:unknown;try{const text=await this.app.vault.read(companion),match=text.match(/^---\s*\r?\n([\s\S]*?)\r?\n---(?:\s*\r?\n|$)/);frontmatter=match?parseYaml(match[1]):undefined;}catch{continue;}
    if(!frontmatter||typeof frontmatter!=='object'||(frontmatter as Record<string,unknown>).image_graph_id!==extracted.id)continue;
    const metadata=await this.readMetadata(extracted.id),regionId=typeof metadata.source_region==='string'?metadata.source_region:undefined,region=regionId?regions.get(regionId):undefined;
    if(!region)continue;const parent=snapshot.images.find(image=>image.id===region.imageId);if(!parent)continue;

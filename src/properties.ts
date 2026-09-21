@@ -80,3 +80,10 @@ export function propertyMessage(error: unknown): string {
  if (error instanceof PropertyError) return error.detail;
  return error instanceof Error ? error.message : String(error);
 }
+
+/** The one definition of a usable relation: the label a connection shows, or nothing. */
+export function relationOf(properties: unknown): string | null {
+ if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return null;
+ const value = (properties as Record<string, unknown>).relation;
+ return typeof value === 'string' && value.trim() ? value : null;
+}

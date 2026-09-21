@@ -1,5 +1,5 @@
 import type {Attachment, EdgeRecord, ImageRecord, RegionRecord} from './types';
-import {relationOf} from './graph';
+import {relationOf} from './properties';
 
 export const PLUGIN_ROOT = '_Image Graph';
 export const NOTES_ROOT = `${PLUGIN_ROOT}/Notes`;

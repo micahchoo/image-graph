@@ -1,3 +1,4 @@
+import {DECODE_SLOTS, CACHE_BUDGET_BYTES} from './jobs';
 import {App, TFile} from 'obsidian';
 import type {ImageRecord} from './types';
 import {detached} from './dom';
@@ -9,7 +10,7 @@ const shapeOf=(image:ImageRecord)=>Math.round(ratioOf(image)*100);
 /** The texture for one entry: its longer side is the detail size, the shorter one follows. */
 const textureSize=(entry:{size:number;shape:number})=>exploreSize({width:entry.shape,height:100},entry.size);
 export function detailSize(pixels:number):number{return pixels<=256?256:pixels<=512?512:pixels<=1024?1024:2048;}
-const BUDGET=96*1024*1024;
+const BUDGET=CACHE_BUDGET_BYTES;
 
 /** Resolution follows displayed pixels and the texture keeps the picture's proportions;
  * retained and queued textures share a byte budget. A square texture for a wide picture
@@ -33,7 +34,7 @@ export class ThumbnailCache {
  private smaller(path:string,size:number,shape:number):HTMLCanvasElement|null{for(const candidate of [1024,512,256]){if(candidate>=size)continue;const entry=this.entries.get(`${path}\0${candidate}\0${shape}`);if(entry?.canvas)return entry.canvas;}return null;}
  private drop(entry:Entry){if(this.entries.get(entry.key)!==entry)return;this.entries.delete(entry.key);this.bytes-=entry.size*entry.size*4;entry.ready.clear();}
  invalidate(path:string){for(const entry of this.entries.values())if(entry.path===path)this.drop(entry);}
- private pump(){while(!this.disposed&&this.running<2&&this.queue.length){const entry=this.queue.shift();if(!entry||this.entries.get(entry.key)!==entry)continue;this.running++;void this.load(entry).finally(()=>{this.running--;this.pump();});}}
+ private pump(){while(!this.disposed&&this.running<DECODE_SLOTS&&this.queue.length){const entry=this.queue.shift();if(!entry||this.entries.get(entry.key)!==entry)continue;this.running++;void this.load(entry).finally(()=>{this.running--;this.pump();});}}
  private async load(entry:Entry):Promise<void>{
   try{
    const file=this.app.vault.getAbstractFileByPath(entry.path);if(!(file instanceof TFile))throw new Error('Image missing');

@@ -1,31 +1,11 @@
 import type {Camera, EdgeRecord, ImageRecord, Point, Rect, RegionRecord} from './types';
-import {edgeEndpoints, relationOf} from './graph';
+import {edgeEndpoints} from './edge-endpoints';
+import {relationOf} from './properties';
 import {onScreen, overlaps} from './geometry';
-import {shortenLabel} from './presentation';
-import {LANE, routeOrthogonal} from './routing';
+import {shortenLabel, type Palette} from './presentation';
+export {DEFAULT_PALETTE, themePalette} from './presentation';
+import {LANE, ROUTE_LIMIT, ROUTE_MIN_SCALE, routeOrthogonal} from './routing';
 import {isForeignRegion} from './annotations';
-
-export interface Palette {bg: string; card: string; fg: string; accent: string; region: string; missing: string; font: string}
-/** Readable without a document, and overridden by the theme wherever there is one. */
-export const DEFAULT_PALETTE: Palette = {bg: '#181b20', card: '#333840', fg: '#dddddd', accent: '#7bbda8', region: '#69dfb0', missing: '#733c43', font: 'sans-serif'};
-/** Below this scale the view draws straight lines, and above this many so does it. Same here. */
-export const ROUTE_MIN_SCALE = .06, ROUTE_LIMIT = 240;
-
-export function themePalette(style: CSSStyleDeclaration): Palette {
- const read = (name: string, fallback: string) => style.getPropertyValue(name).trim() || fallback;
- return {
-  bg: read('--background-primary', DEFAULT_PALETTE.bg),
-  card: read('--background-secondary', DEFAULT_PALETTE.card),
-  fg: read('--text-normal', DEFAULT_PALETTE.fg),
-  accent: read('--interactive-accent', DEFAULT_PALETTE.accent),
-  region: read('--color-green', DEFAULT_PALETTE.region),
-  missing: read('--background-modifier-error', DEFAULT_PALETTE.missing),
-  // The computed family, already resolved. A canvas font string cannot hold `var()`: the
-  // canvas rejects the whole assignment and keeps 10px sans-serif, which is what every
-  // export and embed drew with until 2026-09-21.
-  font: style.fontFamily.trim() || DEFAULT_PALETTE.font,
- };
-}
 
 export interface Scene {
  images: readonly ImageRecord[];

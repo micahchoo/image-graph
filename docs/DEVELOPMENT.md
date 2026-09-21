@@ -42,15 +42,13 @@ Storage module src/store.ts exports GraphStore:
 - renamePath(oldPath: string, newPath: string): Promise<void>
 - flush(): Promise<void>
 
-Graph module src/graph.ts exports:
-- neighborhood(snapshot, rootId, depth, expanded: Set<string>, limit?: number): Neighborhood — no relation filter; one relation is relationNeighborhood, and dimming is presentation.ts
-- Neighborhood has ids: string[], edges: EdgeRecord[], distances: Map<string,number>, parents: Map<string,{imageId:string;edge:EdgeRecord}>, capped: boolean
-- tracePath(rootId, targetId, neighborhood): Array<{from:string;to:string;edge:EdgeRecord}>
-- forceLayout(images: ImageRecord[], neighborhood, rootId, pinned: Set<string>, previous: Map<string,Rect>): Map<string,Rect>
-- endpointPosition(endpoint: Endpoint, images: Map<string,Rect>, regions: Map<string,RegionRecord>): Point
-- edgeEndpoints(edge, images, regions): boundary-clipped source and target points for drawing and hit detection
-- containsRegion(point: Point, shape: RegionShape): boolean (point normalized to image)
-- graph.ts imports nothing from obsidian. What a property may hold is properties.ts#parseProperties, and only that.
+The graph is four pure modules (one file, graph.ts, until 2026-09-21; none imports obsidian):
+- src/traversal.ts — neighborhood(snapshot, rootId, depth, expanded: Set<string>, limit?: number): Neighborhood — no relation filter; one relation is relationNeighborhood, and dimming is presentation.ts. Neighborhood has ids: string[], edges: EdgeRecord[], distances: Map<string,number>, parents: Map<string,{imageId:string;edge:EdgeRecord}>, capped: boolean. tracePath(rootId, targetId, neighborhood): Array<{from:string;to:string;edge:EdgeRecord}>. relationNames(snapshot).
+- src/force-layout.ts — forceLayout(images: ImageRecord[], neighborhood, rootId, pinned: Set<string>, previous: Map<string,Rect>): Map<string,Rect>; hopRadii.
+- src/edge-endpoints.ts — endpointPosition(endpoint: Endpoint, images: Map<string,Rect>, regions: Map<string,RegionRecord>): Point; edgeEndpoints(edge, images, regions): boundary-clipped source and target points for drawing and hit detection.
+- src/region-shape.ts — parseRegionShape, regionHandles, resizeRegion, containsRegion(point: Point, shape: RegionShape): boolean (point normalized to image).
+- relationOf(properties) lives in properties.ts with the rest of what a property may hold; parseProperties is the only reader of a property value.
+- One Palette (presentation.ts) serves the live canvas and the still renderer, with the theme's font; ROUTE_LIMIT and ROUTE_MIN_SCALE are routing.ts's.
 
 Exploration module src/exploration.ts exports Exploration and EXPLORE_LIMIT:
 - Exploration.fromImages(snapshot, imageIds, savedCamera) and .fromRelation(snapshot, relation, savedCamera) return null rather than an empty view.
@@ -126,7 +124,7 @@ View module src/view.ts exports VIEW_TYPE = 'image-graph-view' and ImageGraphVie
 - Navigate mode pans even over images. Move images mode changes positions and snaps whole-vault top-left coordinates to a 40px grid.
 - Wheel scrolls, ctrl/meta wheel zooms, deltaMode normalized. Shift-drag selects a band; dragging one selected image carries the selection.
 - Hover is read once per frame inside draw(), never per pointermove, and frozen while a gesture owns the pointer. pointerDown re-reads instead.
-- A selected region draws grips above 48 screen pixels; dragging one resizes through graph.ts#resizeRegion from the shape the drag began with.
+- A selected region draws grips above 48 screen pixels; dragging one resizes through region-shape.ts#resizeRegion from the shape the drag began with.
 - Properties use a typed builder with plain-language labels. Serialized metadata remains arbitrary YAML-compatible data.
 - Exploration state and its transitions live in src/exploration.ts; the view holds one `Exploration | null`, restores the saved camera on exit, and syncs the depth and relation controls.
 - Export whole/current/selected images using ViewFrame. Visual export is current viewport; ordinary Canvas cannot preserve region endpoints.
@@ -138,7 +136,7 @@ See [the runtime report](docs/verification.md) for verified behavior and limits.
 
 Root agent owns package/config/types/main.ts/thumbnails.ts/docs and installation/runtime testing.
 Agent 1 owns store.ts and storage tests only.
-Agent 2 owns graph.ts/export.ts and their tests only.
+Agent 2 owns traversal.ts/force-layout.ts/edge-endpoints.ts/region-shape.ts/export.ts and their tests only.
 Agent 3 owns view.ts/styles.css and view-specific modules only.
 
 Use Obsidian public APIs, lifecycle disposal, no unsafe any, no broad ESLint disables. Required checks: npm run check, npm run lint, npm test, npm run build. Meaningful behavioral tests for persistence, geometry/traversal, export mapping; no mirrored UI tests.

@@ -1,18 +1,17 @@
 import type {Camera, EdgeRecord, Endpoint, ImageAssets, Point, Rect, RegionShape} from './types';
-import {edgeEndpoints, regionHandles, relationOf} from './graph';
+import {edgeEndpoints} from './edge-endpoints';
+import {regionHandles} from './region-shape';
+import {relationOf} from './properties';
 import {isForeignRegion} from './annotations';
 import {spansViewport, viewportRect} from './camera';
 import {onScreen, overlaps, rectBetween} from './geometry';
 import {type Draft, type Mode, regionFromDrag} from './gestures';
-import {connectionStyle, shortenLabel} from './presentation';
+import {connectionStyle, shortenLabel, type Palette} from './presentation';
 import {midpointOf} from './routing';
-import {ROUTE_LIMIT, type GraphScene} from './scene';
+import {type GraphScene} from './scene';
+import {ROUTE_LIMIT} from './routing';
 import {detailSize} from './thumbnails';
 import {detached} from './dom';
-
-/** Every colour on the canvas comes from the theme. The eight that did not ignored a light
- * theme and the owner's own accent, and were never measured for contrast. */
-export interface Palette {bg: string; card: string; fg: string; accent: string; picked: string; region: string; regionHover: string; missing: string}
 
 /** What the pointer and the tools are doing this frame. Everything else comes from the scene. */
 export interface FrameState {
@@ -213,7 +212,7 @@ export class CanvasRenderer {
  /** A picture's name under it, and the badge on a starting picture, where neither collides. */
  private caption(ctx: CanvasRenderingContext2D, scene: GraphScene, state: FrameState, id: string, r: Rect, taken: Rect[]): void {
   const s = state.camera.scale, {palette} = state;
-  ctx.font = `${12 / s}px sans-serif`; ctx.fillStyle = palette.fg;
+  ctx.font = `${12 / s}px ${palette.font}`; ctx.fillStyle = palette.fg;
   const label = scene.caption(id) + (scene.exploration?.pinned.has(id) ? ' · pinned' : '');
   const text = shortenLabel(label, r.width, value => ctx.measureText(value).width);
   const box = {x: r.x, y: r.y + r.height + 3 / s, width: r.width, height: 19 / s};
@@ -315,7 +314,7 @@ export class CanvasRenderer {
  private drawLabels(ctx: CanvasRenderingContext2D, scene: GraphScene, state: FrameState, labels: LabelJob[], captions: Rect[]): void {
   if (!labels.length) return;
   const s = state.camera.scale, {palette} = state;
-  ctx.font = `${12 / s}px sans-serif`;
+  ctx.font = `${12 / s}px ${palette.font}`;
   const height = 20 / s, taken: Rect[] = [...captions];
   for (const label of labels.sort((a, b) => a.priority - b.priority)) {
    const box = this.labelBox(scene, state, label.a, label.b, ctx.measureText(label.text).width + 8 / s, height, taken);

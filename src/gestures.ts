@@ -1,5 +1,5 @@
 import type {Point, Rect, RegionShape} from './types';
-import type {HandleId} from './graph';
+import type {HandleId} from './region-shape';
 
 /** The five tools. What a drag means depends on which one is holding the pointer. */
 export type Mode = 'select' | 'rect' | 'polygon' | 'connect' | 'move';

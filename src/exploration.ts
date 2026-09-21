@@ -1,5 +1,6 @@
 import type {Camera, GraphSnapshot, Rect} from './types';
-import {forceLayout, neighborhoodFrom, relationNeighborhood, type Neighborhood} from './graph';
+import {forceLayout} from './force-layout';
+import {neighborhoodFrom, relationNeighborhood, type Neighborhood} from './traversal';
 
 /** Above this a neighbourhood is a wall rather than an answer, and the status line says so. */
 export const EXPLORE_LIMIT = 150;

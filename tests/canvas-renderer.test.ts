@@ -2,7 +2,8 @@ import {describe, expect, it, vi} from 'vitest';
 
 vi.mock('obsidian', () => ({}));
 
-import {CanvasRenderer, type FrameState, type Palette} from '../src/canvas-renderer';
+import {CanvasRenderer, type FrameState} from '../src/canvas-renderer';
+import type {Palette} from '../src/presentation';
 import {GraphScene} from '../src/scene';
 import {imageSelection} from '../src/selection';
 import {recordingContext} from './fake-canvas';
@@ -16,7 +17,7 @@ const edge = (id: string, source: string, target: string): EdgeRecord =>
 
 const PALETTE: Palette = {
  bg: '#bg', card: '#card', fg: '#fg', accent: '#accent',
- picked: '#picked', region: '#region', regionHover: '#hover', missing: '#missing',
+ picked: '#picked', region: '#region', regionHover: '#hover', missing: '#missing', font: 'sans-serif', font: 'sans-serif',
 };
 
 /** No canvas in the runner, so the renderer is judged on the calls it makes. */

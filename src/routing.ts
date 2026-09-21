@@ -1,5 +1,10 @@
 import type {Point, Rect} from './types';
 
+/** Above this many connections on screen, routing costs more than the tangle it removes. */
+export const ROUTE_LIMIT = 240;
+/** Below this scale a connection is a straight line: nothing it would route around is legible. */
+export const ROUTE_MIN_SCALE = .06;
+
 /** A connection that runs across an unrelated image is read as passing behind it. An
  * orthogonal path around the obstacles says plainly which two things are joined.
  *

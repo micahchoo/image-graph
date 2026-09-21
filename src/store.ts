@@ -1,10 +1,9 @@
 import {parseYaml} from 'obsidian';
 import type {App, TFile} from 'obsidian';
 import type {EdgeRecord, GraphSnapshot, ImageRecord, Properties, RegionRecord} from './types';
-import {ANNOTATIONS_KEY, LINKS_KEY, RESERVED_KEYS, isRecord, parseProperties} from './properties';
+import {ANNOTATIONS_KEY, LINKS_KEY, RESERVED_KEYS, isRecord, parseProperties, relationOf} from './properties';
 import {NOTES_ROOT, OLD_NOTES_ROOT, PLUGIN_ROOT, baseName, companionCandidates, companionLinks, companionPath, sameLinks} from './links';
 import {History, type Entry} from './history';
-import {relationOf} from './graph';
 import {isForeignRegion, type ImageSource} from './annotations';
 import {ensureFolder, isFile} from './folders';
 import {ShardStore, validateRecord, type Kind, type Stored} from './shards';

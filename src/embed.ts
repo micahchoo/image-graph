@@ -1,9 +1,11 @@
 import type {GraphSnapshot, ImageRecord, Rect} from './types';
-import {forceLayout, neighborhood, relationNeighborhood} from './graph';
+import {forceLayout} from './force-layout';
+import {neighborhood, relationNeighborhood} from './traversal';
 import {fitBox} from './camera';
 import {boundsOf} from './geometry';
 import {imageCaptions} from './presentation';
-import {DEFAULT_PALETTE, renderScene, themePalette} from './render';
+import {renderScene} from './render';
+import {DEFAULT_PALETTE, themePalette} from './presentation';
 
 /** `path` is absent for a relation, which belongs to no one picture. */
 export interface EmbedSpec {path: string | null; depth: number; relation: string | null; height: number}

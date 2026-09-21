@@ -1,5 +1,5 @@
 import type {EdgeRecord, Endpoint, GraphData, GraphSnapshot, ImageRecord, Point, Rect, RegionRecord} from './types';
-import {containsRegion} from './graph';
+import {containsRegion} from './region-shape';
 import {Exploration} from './exploration';
 import {boundsOf} from './geometry';
 import {imageCaptions} from './presentation';
@@ -10,8 +10,7 @@ import {NOTHING, prune, selectTarget, selectedImages, type Selection} from './se
 /** What a pointer resolved to: a picture or one of its regions, or a connection. */
 export type Hit = {endpoint: Endpoint} | {edge: EdgeRecord};
 
-/** Above this many connections on screen, routing costs more than the tangle it removes. */
-export const ROUTE_LIMIT = 240;
+export {ROUTE_LIMIT} from './routing';
 /** How near the pointer must come to a connection, in screen pixels. */
 export const REACH = 7;
 /** Whole-vault positions snap to this grid. */

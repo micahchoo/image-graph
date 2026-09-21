@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {PropertyError, RESERVED_KEYS, parseProperties, parsePropertyValue, propertyMessage} from '../src/properties';
-import {parseRegionShape, regionHandles, relationOf, resizeRegion, type HandleId} from '../src/graph';
+import {PropertyError, RESERVED_KEYS, parseProperties, parsePropertyValue, propertyMessage, relationOf} from '../src/properties';
+import {parseRegionShape, regionHandles, resizeRegion, type HandleId} from '../src/region-shape';
 import type {RegionShape} from '../src/types';
 
 describe('property value contract', () => {

@@ -1,5 +1,34 @@
 import type {EdgeRecord, ImageRecord, RegionRecord} from './types';
 
+/**
+ * Every colour a picture of the graph uses, and the font its labels are set in. One shape for
+ * the live canvas and the still renderer; until 2026-09-21 each read the theme for itself, with
+ * different fields, and the live canvas set its labels in a generic family the theme never chose.
+ */
+export interface Palette {bg: string; card: string; fg: string; accent: string; picked: string; region: string; regionHover: string; missing: string; font: string}
+
+/** Readable without a document, and overridden by the theme wherever there is one. */
+export const DEFAULT_PALETTE: Palette = {bg: '#181b20', card: '#333840', fg: '#dddddd', accent: '#7bbda8', picked: '#ffe0a0', region: '#69dfb0', regionHover: '#a6f5d2', missing: '#733c43', font: 'sans-serif'};
+
+/** The palette the theme gives, read once per frame from a computed style. */
+export function themePalette(style: CSSStyleDeclaration): Palette {
+ const read = (name: string, fallback: string) => style.getPropertyValue(name).trim() || fallback;
+ return {
+  bg: read('--background-primary', DEFAULT_PALETTE.bg),
+  card: read('--background-secondary', DEFAULT_PALETTE.card),
+  fg: read('--text-normal', DEFAULT_PALETTE.fg),
+  accent: read('--interactive-accent', DEFAULT_PALETTE.accent),
+  picked: read('--color-yellow', DEFAULT_PALETTE.picked),
+  region: read('--color-green', DEFAULT_PALETTE.region),
+  regionHover: read('--color-cyan', DEFAULT_PALETTE.regionHover),
+  missing: read('--background-modifier-error', DEFAULT_PALETTE.missing),
+  // The computed family, already resolved. A canvas font string cannot hold `var()`: the
+  // canvas rejects the whole assignment and keeps 10px sans-serif, which is what every
+  // export and embed drew with until 2026-09-21.
+  font: style.fontFamily.trim() || DEFAULT_PALETTE.font,
+ };
+}
+
 export interface ConnectionFocus {
  selected: ReadonlySet<string>;
  selectedEdge: string | null;

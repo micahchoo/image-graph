@@ -1,3 +1,8 @@
+/** How many image decodes may run at once, per cache. Three caches each held this literal. */
+export const DECODE_SLOTS = 2;
+/** Bytes one bitmap cache may hold. Two caches take one each, so the plugin's ceiling is twice this plus the renderer's detail budget. */
+export const CACHE_BUDGET_BYTES = 96 * 1024 * 1024;
+
 export interface JobState {
  /** What to call it in one short phrase, in the person's words. */
  name: string;

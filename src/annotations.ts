@@ -13,7 +13,7 @@
  */
 import type {App} from 'obsidian';
 import type {Attachment, RegionRecord} from './types';
-import {parseRegionShape} from './graph';
+import {parseRegionShape} from './region-shape';
 import {isRecord} from './properties';
 
 export const ANNOTATION_ROOT = 'Image Annotation';

@@ -2,10 +2,12 @@ import {FuzzySuggestModal, ItemView, Menu, Modal, Notice, WorkspaceLeaf, setIcon
 import type {App} from 'obsidian';
 import type {Camera, Direction, EdgeRecord, Endpoint, GraphHost, GraphSnapshot, ImageRecord, Point, Properties, Rect, RegionRecord, RegionShape, ViewFrame} from './types';
 import {newId} from './types';
-import {edgeEndpoints, parseRegionShape, regionHandles, relationNames, relationOf, resizeRegion, tracePath, type HandleId} from './graph';
+import {edgeEndpoints} from './edge-endpoints';
+import {parseRegionShape, regionHandles, resizeRegion, type HandleId} from './region-shape';
+import {relationNames, tracePath} from './traversal';
+import {relationOf, RESERVED_KEYS, propertyMessage} from './properties';
 import {isForeignRegion} from './annotations';
 import {renderPropertyBuilder} from './property-builder';
-import {RESERVED_KEYS, propertyMessage} from './properties';
 import {EXPLORE_LIMIT, Exploration} from './exploration';
 import {NOTHING, imageSelection, keepImages, type Selection} from './selection';
 import {neighbourInDirection} from './spatial';
@@ -13,6 +15,7 @@ import {GraphScene, type Hit} from './scene';
 import {CanvasRenderer} from './canvas-renderer';
 import {SHORTCUTS, commandFor, swallows, type Command} from './shortcuts';
 import {noteBlock} from './blocks';
+import {themePalette} from './presentation';
 import {MAX_FIT_SCALE, boxAround, fitBox, scrollBy, scrollIntoView, toWorld, viewportRect, wheelGesture, zoomAt as zoomCameraAt} from './camera';
 import {rectBetween} from './geometry';
 import {type Draft, type Mode, type Pinch, dragBecomes, movedEnough, pinchFrom, pinchStep, pressIntent, regionFromDrag} from './gestures';
@@ -287,15 +290,7 @@ export class ImageGraphView extends ItemView {
   this.pathText.toggleClass('is-hidden',!ex);if(ex?.relation){this.pathText.setText(`Every connection labelled “${ex.relation}” · ${ex.graph.ids.length} image${ex.graph.ids.length===1?'':'s'}${ex.graph.capped?` · limit ${EXPLORE_LIMIT}`:''}. Choose another relation below, or Vault to leave.`);}else if(ex){const target=[...this.selected][0];this.pathText.setText(target&&!ex.isRoot(target)&&steps.length?`One shortest path · ${steps.length} hops\n`+steps.map(step=>{const e=step.edge,forward=e.source.imageId===step.from,from=forward?e.source:e.target,to=forward?e.target:e.source,arrow=e.direction==='both'?'↔':e.direction==='none'?'—':(e.direction==='forward')===forward?'→':'←';return `${this.scene.describe(from)} ${arrow} ${relation(e)} ${arrow} ${this.scene.describe(to)}`;}).join('\n'):ex.roots.length>1?`${ex.roots.length} starting images · select another to trace its path from the first.`:'Starting image anchored · select an image to trace its path. Links can be traversed either way.');}
  }
  /** Every colour the canvas uses, read from the theme each frame. */
- private palette(){
-  const css=this.win.getComputedStyle(this.contentEl),colour=(name:string,fallback:string)=>css.getPropertyValue(name).trim()||fallback;
-  return{
-   bg:colour('--background-primary','#181b20'),card:colour('--background-secondary','#333840'),
-   fg:colour('--text-normal','#ddd'),accent:colour('--interactive-accent','#7bbda8'),
-   picked:colour('--color-yellow','#ffe0a0'),region:colour('--color-green','#69dfb0'),
-   regionHover:colour('--color-cyan','#a6f5d2'),missing:colour('--background-modifier-error','#733c43'),
-  };
- }
+ private palette(){return themePalette(this.win.getComputedStyle(this.contentEl));}
  private syncModeBar(){
   const drawing=this.mode==='rect'||this.mode==='polygon'||this.mode==='connect',polygon=this.mode==='polygon';
   this.drawingControls.toggleClass('is-hidden',!drawing);
@@ -666,7 +661,7 @@ export class ImageGraphView extends ItemView {
   });};
  }
 
- focusImage(imageId:string){const r=this.positions.get(imageId)??this.scene.images.get(imageId);if(!r)return;this.setSelection(imageSelection([imageId]));const scale=Math.min(1.8,(this.canvas.clientWidth-80)/r.width,(this.canvas.clientHeight-100)/r.height);this.camera={scale:Math.max(.01,scale),x:this.canvas.clientWidth/2-(r.x+r.width/2)*scale,y:this.canvas.clientHeight/2-(r.y+r.height/2)*scale};this.schedule();}
+ focusImage(imageId:string){const r=this.positions.get(imageId)??this.scene.images.get(imageId);if(!r)return;this.setSelection(imageSelection([imageId]));this.camera=fitBox(r,{width:this.canvas.clientWidth,height:this.canvas.clientHeight},{padX:80,padY:100,minScale:.01,maxScale:1.8});this.schedule();}
  revealExtracted(imageId:string,parentImageId:string){this.refresh();if(this.exploration){this.exploration.expand(parentImageId);this.rebuild(false);}this.focusImage(imageId);}
  /** Explore whatever is chosen. A connection is a thing a person pointed at, so it means the
   * two pictures it joins — `Explore every “…” connection` is the relation, and it says so. */

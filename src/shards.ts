@@ -1,7 +1,7 @@
 import type {App} from 'obsidian';
 import type {EdgeRecord, ImageRecord, RegionRecord} from './types';
-import {parseRegionShape, relationOf} from './graph';
-import {isRecord} from './properties';
+import {parseRegionShape} from './region-shape';
+import {relationOf, isRecord} from './properties';
 import {DATA_ROOT, ensureFolder, isFile} from './folders';
 
 export type Kind = 'images' | 'regions' | 'edges';

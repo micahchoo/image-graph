@@ -1,3 +1,4 @@
+import {DECODE_SLOTS} from './jobs';
 import {App, TFile} from 'obsidian';
 import type {PixelSize} from './dimensions';
 import {readImageSize} from './dimensions';
@@ -84,7 +85,7 @@ export class SizeIndex {
  private pump(): void {
   if (this.jobs && (this.job || this.queue.length || this.running)) this.track();
   if (this.job?.signal.aborted) { this.queue = []; this.queued.clear(); this.flush(); this.job.finish(); this.job = undefined; return; }
-  while (!this.disposed && this.running < 2 && this.queue.length) {
+  while (!this.disposed && this.running < DECODE_SLOTS && this.queue.length) {
    const image = this.queue.shift()!;
    this.running++;
    void this.measure(image).finally(() => { this.running--; this.measured++; if (!this.queue.length && !this.running) this.flush(); this.pump(); });

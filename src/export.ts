@@ -4,7 +4,8 @@ import type {EdgeRecord, GraphSnapshot, ImageRecord, Rect, ViewFrame} from './ty
 import {detached} from './dom';
 import {onScreen} from './geometry';
 import {EXPORTS_ROOT, ensureFolder} from './folders';
-import {DEFAULT_PALETTE, renderScene, themePalette} from './render';
+import {renderScene} from './render';
+import {DEFAULT_PALETTE, themePalette} from './presentation';
 import {imageCaptions} from './presentation';
 
 type CanvasNode = {id:string; type:'file'|'text'; x:number; y:number; width:number; height:number; file?:string; text?:string};

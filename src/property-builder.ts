@@ -129,7 +129,9 @@ class ValueEditor {
   if (this.type === 'object') { const result: {[key:string]: PropertyValue} = {}; this.entries.forEach((entry, i) => { const key = entry.key.trim(); const where = [...path, key || '(unnamed)']; checkKey(entry.key, where); if (Object.prototype.hasOwnProperty.call(result, key)) throw new PropertyError(`Use a unique property name; “${key}” appears more than once.`, where); result[key] = this.children[i].getValue(where); }); return result; }
   if (this.type === 'list') return this.children.map((child, index) => child.getValue([...path, index]));
   if (this.type === 'null') return null;
-  const input = this.root.querySelector('input[aria-label="Content"], input[aria-label="Yes"]') as HTMLInputElement;
+  // The one input this editor made, held since render: not re-found by a selector that can drift from it.
+  const input = this.control as HTMLInputElement | undefined;
+  if (!input) throw new PropertyError('This value has no input to read.', path);
   if (this.type === 'boolean') return input.checked;
   if (this.type === 'number') { if (!input.value.trim()) throw new PropertyError('Enter a number for Content.', path); const n = Number(input.value); if (!Number.isFinite(n)) throw new PropertyError('Enter a finite number for Content.', path); return n; }
   return parsePropertyValue(input.value, path);

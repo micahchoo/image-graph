@@ -1,3 +1,4 @@
+import {DECODE_SLOTS, CACHE_BUDGET_BYTES} from './jobs';
 import {App, TFile} from 'obsidian';
 import type {ImageRecord} from './types';
 import {detached} from './dom';
@@ -5,7 +6,7 @@ import type {JobHandle, Jobs} from './jobs';
 import {THUMBNAILS_ROOT, ensureFolder} from './folders';
 
 const TILE=32, SIDE=512, PER_PAGE=256, ROOT=THUMBNAILS_ROOT;
-const PAGE_BYTES=SIDE*SIDE*4, BUDGET=96*1024*1024, GRACE=1000;
+const PAGE_BYTES=SIDE*SIDE*4, BUDGET=CACHE_BUDGET_BYTES, GRACE=1000;
 type Signature={id:string;path:string;mtime:number;size:number};
 type Crop={source:CanvasImageSource;x:number;y:number;width:number;height:number};
 /** `images` is a slot array: a hole is an image that left, and holes are never closed up. */
@@ -117,7 +118,7 @@ export class OverviewAtlas {
  private pump(){
   if(this.jobs&&(this.job||this.queue.length||this.running))this.track();
   if(this.job?.signal.aborted){for(const page of this.queue)page.queued=false;this.queue=[];this.job.finish();this.job=undefined;return;}
-  while(!this.disposed&&this.running<2&&this.queue.length){const page=this.queue.shift()!;if(!this.current(page)||!page.queued)continue;page.queued=false;page.loading=true;this.running++;void this.load(page).finally(()=>{page.loading=false;this.running--;this.notify(page);this.pump();});}
+  while(!this.disposed&&this.running<DECODE_SLOTS&&this.queue.length){const page=this.queue.shift()!;if(!this.current(page)||!page.queued)continue;page.queued=false;page.loading=true;this.running++;void this.load(page).finally(()=>{page.loading=false;this.running--;this.notify(page);this.pump();});}
  }
  /** Counted in images rather than pages, because that is the number a person can feel. */
  private track(){

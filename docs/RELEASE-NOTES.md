@@ -1,4 +1,4 @@
-# Unreleased
+# 0.2.2
 
 Regions from the Image Annotation plugin.
 
@@ -10,6 +10,14 @@ Regions from the Image Annotation plugin.
 - A web image Image Annotation saved gets a companion named after the note it was clipped from, with `source_url` and `source_note`.
 
 Snapshots and note embeds draw what the workspace draws.
+
+Also in this release:
+
+- Labels on the canvas are set in the theme's font. They were a generic family; exports and embeds had already been corrected.
+- TIFF images the catalog holds are now offered by **Explore the active image**, **Find the active image** and the file menu, and a change to one refreshes the graph.
+- A companion note with Windows line endings is read by the extraction backfill, as the store already read it.
+- Internal: the graph's traversal, force layout, edge endpoints and region-shape algebra are four modules (they were one file); one Palette for both renderers; the route limits declared once; the decode-slot count and the two cache budgets named once; the property editor reads the input it holds rather than re-finding it; focusing an image uses the one fit.
+
 
 - Labels and captions in exports and embeds used a font string the canvas cannot parse, so they were drawn at 10px in the default face. They now use the interface font at the intended size.
 - Connections in a snapshot go around the images between their ends, as they do in the workspace, instead of cutting through them.

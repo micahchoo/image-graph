@@ -49,8 +49,14 @@ export function neighborhoodFrom(snapshot: {images: ImageRecord[]; edges: EdgeRe
  const roots = rootIds.filter((id) => imageIds.has(id));
  if (!roots.length) return {ids, edges: [], distances, parents, capped: false};
  const queue: string[] = [];
- for (const id of roots) if (!distances.has(id)) { distances.set(id, 0); ids.push(id); queue.push(id); }
  let capped = false;
+ // The cap counts starting images too: a selection of every picture in the vault is a wall
+ // as much as a neighbourhood that size, and it says so the same way.
+ for (const id of roots) {
+  if (distances.has(id)) continue;
+  if (ids.length >= limit) { capped = true; continue; }
+  distances.set(id, 0); ids.push(id); queue.push(id);
+ }
  while (queue.length) {
   const current = queue.shift()!;
   const distance = distances.get(current)!;
@@ -102,11 +108,18 @@ export function relationNames(snapshot: {edges: EdgeRecord[]}): string[] {
  return [...new Set(snapshot.edges.map((edge) => relationOf(edge.properties) ?? '').filter(Boolean))].sort();
 }
 
-export function tracePath(rootId: string, targetId: string, neighborhood: Neighborhood): Array<{from: string; to: string; edge: EdgeRecord}> {
- const path: Array<{from: string; to: string; edge: EdgeRecord}> = [];
+export interface PathStep {from: string; to: string; edge: EdgeRecord}
+
+/**
+ * The shortest path the traversal found to `targetId`: back up the parent chain to `rootId`,
+ * or, given null, to whichever starting image the chain ends at. Empty when the chain does not
+ * reach a root — an image reached by no traversal, or a relation, which has no parents.
+ */
+export function tracePath(rootId: string | null, targetId: string, neighborhood: Neighborhood): PathStep[] {
+ const path: PathStep[] = [];
  let current = targetId;
  const seen = new Set<string>();
- while (current !== rootId) {
+ while (rootId === null ? neighborhood.distances.get(current) !== 0 : current !== rootId) {
   if (seen.has(current)) return [];
   seen.add(current);
   const parent = neighborhood.parents.get(current);

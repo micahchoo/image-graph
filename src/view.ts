@@ -4,7 +4,7 @@ import type {Camera, Direction, EdgeRecord, Endpoint, GraphHost, GraphSnapshot, 
 import {newId} from './types';
 import {edgeEndpoints} from './edge-endpoints';
 import {parseRegionShape, regionHandles, resizeRegion, type HandleId} from './region-shape';
-import {relationNames, tracePath} from './traversal';
+import {relationNames} from './traversal';
 import {relationOf, RESERVED_KEYS, propertyMessage} from './properties';
 import {isForeignRegion} from './annotations';
 import {renderPropertyBuilder} from './property-builder';
@@ -51,6 +51,8 @@ const clamp=(v:number,min:number,max:number)=>Math.max(min,Math.min(max,v));
 const FIT_MARGIN=100;
 /** The zoom and status strip along the bottom, which a fit lifts the picture clear of. */
 const FOOTER_BAND=35;
+/** Narrower than this and the pane is not laid out yet, whatever the observer says. */
+const MIN_VIEWPORT=200;
 const copy=(r:Rect):Rect=>({x:r.x,y:r.y,width:r.width,height:r.height});
 const relation=(e:EdgeRecord)=>relationOf(e.properties)??'related to';
 
@@ -133,7 +135,17 @@ export class ImageGraphView extends ItemView {
  private get selectedEdge(){return this.scene.selectedEdge;}
  private get polygon(){return this.draft?.kind==='polygon'?this.draft:null;}
  private get pending(){return this.draft?.kind==='connect'?this.draft.source:null;}
- private setSelection(next:Selection){this.scene.setSelection(next);}
+ /** The image the explorer was last pointed at, so a marquee redrawn over the same one image
+  * does not ask again; null whenever the selection is not exactly one image. */
+ private mirrored:string|null=null;
+ private setSelection(next:Selection){this.scene.setSelection(next);this.followSelection();}
+ /** One image chosen is one file, and the explorer follows it as it follows the open note.
+  * Both writers of the selection — `setSelection` and `select` — end here. */
+ private followSelection(){
+  const images=this.scene.selectedImages,single=images.size===1?[...images][0]:null;
+  if(single===this.mirrored)return;
+  this.mirrored=single;if(single)this.host.showInExplorer(single);
+ }
  /** Connections are measured against the polyline the last frame drew. See `scene.hit`. */
  private hit(p:Point){return this.scene.hit(p,this.camera.scale,edge=>edgeEndpoints(edge,this.positions,this.scene.regions));}
  private get win(){return this.containerEl.ownerDocument.defaultView??window;}
@@ -190,7 +202,7 @@ export class ImageGraphView extends ItemView {
   const right=bar.createDiv({cls:'image-graph-toolbar-end'});
   /* The Export button was a strict duplicate: `menu()` already ends with `exportMenu`. */
   const actions=right.createEl('button',{cls:'image-graph-icon-button',attr:{'aria-label':'Actions, export and undo'}});setIcon(actions,'more-horizontal');
-  this.registerDomEvent(actions,'click',()=>{const r=actions.getBoundingClientRect();this.menu({clientX:r.left,clientY:r.bottom},this.scene.selectionHit());});
+  this.registerDomEvent(actions,'click',()=>{const r=actions.getBoundingClientRect();this.menu({clientX:r.left,clientY:r.bottom},this.scene.selectionHit(),undefined,true);});
   const properties=right.createEl('button',{cls:'image-graph-icon-button',attr:{'aria-label':'Properties panel'}});setIcon(properties,'panel-right');
   this.registerDomEvent(properties,'click',()=>this.toggleInspector());
   const body=root.createDiv({cls:'image-graph-body'}),stage=body.createDiv({cls:'image-graph-stage'});
@@ -236,12 +248,12 @@ export class ImageGraphView extends ItemView {
   this.registerDomEvent(this.canvas,'pointerup',event=>this.pointerUp(event));
   this.registerDomEvent(this.canvas,'pointercancel',()=>this.cancel());
   this.registerDomEvent(this.canvas,'pointerleave',()=>{this.hoverPoint=null;this.hoverRead=null;this.hover=null;this.grip=null;this.schedule();});
-  this.registerDomEvent(this.canvas,'contextmenu',event=>{event.preventDefault();this.clearLongPress();this.drag=null;const hit=this.hit(this.world(event));if(hit)this.select(hit,false);this.menu(event,hit,event);});
+  this.registerDomEvent(this.canvas,'contextmenu',event=>{event.preventDefault();this.clearLongPress();this.drag=null;const hit=this.hit(this.world(event));this.pointAt(hit);this.menu(event,hit,event);});
   this.registerDomEvent(this.canvas,'dblclick',event=>{if(this.mode==='polygon'){event.preventDefault();this.finishPolygon();}});
   this.registerDomEvent(this.canvas,'wheel',event=>this.wheel(event),{passive:false});
   this.registerDomEvent(this.canvas,'keydown',event=>this.keydown(event));this.registerDomEvent(this.canvas,'keyup',event=>{if(event.code==='Space')this.space=false;});
   this.registerDomEvent(this.win,'blur',()=>this.cancel());
-  this.observer=new ResizeObserver(()=>{const ratio=this.win.devicePixelRatio||1;this.canvas.width=Math.max(1,Math.round(this.canvas.clientWidth*ratio));this.canvas.height=Math.max(1,Math.round(this.canvas.clientHeight*ratio));if(!this.initialized&&this.scene.images.size){this.initialized=true;this.fit();}this.schedule();});this.observer.observe(stage);
+  this.observer=new ResizeObserver(()=>{const ratio=this.win.devicePixelRatio||1;this.canvas.width=Math.max(1,Math.round(this.canvas.clientWidth*ratio));this.canvas.height=Math.max(1,Math.round(this.canvas.clientHeight*ratio));this.fitOnce();this.schedule();});this.observer.observe(stage);
   // A theme change alters every colour the canvas reads, and nothing else redraws it.
   this.registerEvent(this.app.workspace.on('css-change',()=>{this.renderer.invalidate();this.schedule();}));
   this.unsubscribe=this.host.subscribe(()=>this.refresh());
@@ -254,7 +266,21 @@ export class ImageGraphView extends ItemView {
   this.scene.refresh();this.hoverRead=null;
   if(this.draft?.kind==='resize'&&!this.scene.regions.has(this.draft.regionId))this.draft=null;
   const value=this.exploration?.relation??this.exploration?.filter??'';this.relationSelect.empty();this.relationSelect.createEl('option',{attr:{value:''},text:this.exploration?.relation?'Leave this relation':'All relations'});for(const label of [...new Set(this.snapshot.edges.map(relation))].filter(Boolean).sort())this.relationSelect.createEl('option',{attr:{value:label},text:label});this.relationSelect.value=value;
-  if(this.exploration)this.rebuild(false);this.schedule();
+  if(this.exploration)this.rebuild(false);this.fitOnce();this.schedule();
+ }
+ /**
+  * The first fit, once there is something to fit and somewhere to fit it. Two things arrive
+  * in either order: the images, through `refresh` when the store has loaded, and the pane's
+  * size, through the resize observer. After a plugin reload the observer fired first, while
+  * the pane was a few pixels wide: a fit against a viewport smaller than its own padding
+  * clamps to the minimum scale, which reads 0% at the top-left corner, and the flag then
+  * kept the real size from fitting again. The other order left the camera at 100% on the
+  * origin. So both callers ask here, and neither claims the fit until both halves are in.
+  */
+ private fitOnce(){
+  if(this.initialized||!this.scene.images.size)return;
+  if(this.canvas.clientWidth<MIN_VIEWPORT||this.canvas.clientHeight<MIN_VIEWPORT)return;
+  this.initialized=true;this.fit();
  }
  /** What the viewport covers in world coordinates. */
  private viewRect(w:number,h:number,camera:Camera=this.camera):Rect{return viewportRect(camera,w,h);}
@@ -287,7 +313,7 @@ export class ImageGraphView extends ItemView {
   this.syncModeButtons();
   this.canvas.dataset.over=this.drag?'':this.grip?'grip':this.hover?'target':'';
   this.syncStatus(visible,filter);this.announce();
-  this.pathText.toggleClass('is-hidden',!ex);if(ex?.relation){this.pathText.setText(`Every connection labelled “${ex.relation}” · ${ex.graph.ids.length} image${ex.graph.ids.length===1?'':'s'}${ex.graph.capped?` · limit ${EXPLORE_LIMIT}`:''}. Choose another relation below, or Vault to leave.`);}else if(ex){const target=[...this.selected][0];this.pathText.setText(target&&!ex.isRoot(target)&&steps.length?`One shortest path · ${steps.length} hops\n`+steps.map(step=>{const e=step.edge,forward=e.source.imageId===step.from,from=forward?e.source:e.target,to=forward?e.target:e.source,arrow=e.direction==='both'?'↔':e.direction==='none'?'—':(e.direction==='forward')===forward?'→':'←';return `${this.scene.describe(from)} ${arrow} ${relation(e)} ${arrow} ${this.scene.describe(to)}`;}).join('\n'):ex.roots.length>1?`${ex.roots.length} starting images · select another to trace its path from the first.`:'Starting image anchored · select an image to trace its path. Links can be traversed either way.');}
+  this.pathText.toggleClass('is-hidden',!ex);if(ex?.relation){this.pathText.setText(`Every connection labelled “${ex.relation}” · ${ex.graph.ids.length} image${ex.graph.ids.length===1?'':'s'}${ex.graph.capped?` · limit ${EXPLORE_LIMIT}`:''}. Choose another relation below, or Vault to leave.`);}else if(ex){const target=[...this.selected][0];this.pathText.setText(target&&!ex.isRoot(target)&&steps.length?`One shortest path · ${steps.length} hops\n`+steps.map(step=>{const e=step.edge,forward=e.source.imageId===step.from,from=forward?e.source:e.target,to=forward?e.target:e.source,arrow=e.direction==='both'?'↔':e.direction==='none'?'—':(e.direction==='forward')===forward?'→':'←';return `${this.scene.describe(from)} ${arrow} ${relation(e)} ${arrow} ${this.scene.describe(to)}`;}).join('\n'):ex.roots.length>1?`${ex.roots.length} starting images · select an image to trace its path from the nearest of them.`:'Starting image anchored · select an image to trace its path. Links can be traversed either way.');}
  }
  /** Every colour the canvas uses, read from the theme each frame. */
  private palette(){return themePalette(this.win.getComputedStyle(this.contentEl));}
@@ -366,11 +392,14 @@ export class ImageGraphView extends ItemView {
  /** A connection's endpoints sit inside its two image rectangles, so their union bounds the line.
   * The margin keeps a midpoint label that overhangs the viewport, without drawing every distant edge. */
  private world(event:{clientX:number;clientY:number}):Point{const r=this.canvas.getBoundingClientRect();return toWorld(this.camera,event.clientX-r.left,event.clientY-r.top);}
+ /** A right-click or a long press: whatever it lands on becomes the selection, unless it is
+  * already part of one, in which case the selection stands and the menu acts on all of it. */
+ private pointAt(hit:Hit|null){if(hit&&this.scene.holds(hit))return;this.select(hit,false);}
  private select(hit:Hit|null,multiple=false){
-  this.metadataTicket++;this.scene.select(hit,multiple);
+  this.metadataTicket++;this.scene.select(hit,multiple);this.followSelection();
   if(!this.inspector.hasClass('is-hidden'))this.renderInspector();this.schedule();
  }
- private path(){const ex=this.exploration,anchor=ex?.anchor??null,target=[...this.selected][0];return ex&&anchor!==null&&target?tracePath(anchor,target,ex.graph):[];}
+ private path(){const ex=this.exploration,target=[...this.selected][0];return ex&&target?ex.pathTo(target):[];}
  private clearLongPress(){this.win.clearTimeout(this.longPress);this.longPress=undefined;}
  /** Read what the pointer rests on. Called from the frame, so it costs once per frame
   * whatever the pointer's report rate, and never while a gesture owns the pointer. */
@@ -397,7 +426,7 @@ export class ImageGraphView extends ItemView {
   const intent=pressIntent({shift:event.shiftKey,space:this.space,button:event.button,mode:this.mode,onGrip:!!grip});
   if(intent==='marquee')this.drag.marquee={base:this.scene.selectedImages,last:p};
   else if(intent==='handle'&&grip){this.drag.kind='handle';this.draft={kind:'resize',...grip,shape:grip.origin};}
-  if(event.pointerType==='touch')this.longPress=this.win.setTimeout(()=>{if(this.drag?.kind==='waiting'){const target=this.drag.hit;this.drag=null;this.select(target);this.menu(event,target);}},550);
+  if(event.pointerType==='touch')this.longPress=this.win.setTimeout(()=>{if(this.drag?.kind==='waiting'){const target=this.drag.hit;this.drag=null;this.pointAt(target);this.menu(event,target);}},550);
  }
  private pointerMove(event:PointerEvent){
   // Hover comes first: most moves carry no button, and the guard below drops those.
@@ -488,20 +517,19 @@ export class ImageGraphView extends ItemView {
  }
  /** Exhaustive on purpose: a command with no branch here fails to compile. */
  private obey(command:Command){
-  const imageId=[...this.selected][0];
   switch(command.kind){
    case'cancel':return this.cancel();
    case'mode':return this.setMode(command.mode);
    case'connect':{const hit=this.scene.selectionHit();return this.beginConnect(hit&&'endpoint'in hit?hit.endpoint:undefined);}
    case'explore':return this.exploreSelection();
-   case'expand':if(imageId)this.expandImage(imageId);return;
-   case'pin':if(imageId)this.pinImage(imageId);return;
+   case'expand':return this.expandImages([...this.selected]);
+   case'pin':return this.pinImages([...this.selected]);
    case'properties':return this.openInspector();
    case'home':return this.exploration?this.exitExploration():this.fit();
    case'zoom':return this.zoomPreset(command.to);
    case'finish':if(this.mode==='polygon')this.finishPolygon();return;
    case'delete':if(this.mode==='polygon'){this.polygon?.points.pop();this.schedule();}else this.removeSelected();return;
-   case'menu':{const r=this.canvas.getBoundingClientRect();return this.menu({clientX:r.left+40,clientY:r.top+40},this.scene.selectionHit());}
+   case'menu':{const r=this.canvas.getBoundingClientRect();return this.menu({clientX:r.left+40,clientY:r.top+40},this.scene.selectionHit(),undefined,true);}
    case'help':return this.showShortcuts();
    case'undo':return this.run(()=>this.host.undo());
    case'redo':return this.run(()=>this.host.redo());
@@ -533,7 +561,7 @@ export class ImageGraphView extends ItemView {
   const origins=[...this.selected];
   // With nothing selected the arrows walk the camera, which is what a map should do.
   if(!origins.length){this.camera=scrollBy(this.camera,dx,dy);this.schedule();return;}
-  for(const id of origins){const r=this.positions.get(id);if(r&&!this.exploration?.isRoot(id))this.scene.place(id,r.x+dx,r.y+dy,r);}
+  for(const id of origins){const r=this.positions.get(id);if(r&&!this.exploration?.isAnchor(id))this.scene.place(id,r.x+dx,r.y+dy,r);}
   this.scene.moved();this.renderer.invalidate();
   if(!this.exploration){const moved=this.scene.movedRecords(origins);if(moved.length)this.run(()=>this.host.updateImages(moved));}
   this.schedule();
@@ -554,35 +582,100 @@ export class ImageGraphView extends ItemView {
   modal.open();
  }
 
- private menu(point:{clientX:number;clientY:number},hit:Hit|null,event?:MouseEvent){
-  const menu=event?Menu.forEvent(event):new Menu(),item=(label:string,callback:()=>void)=>menu.addItem(i=>i.setTitle(label).onClick(callback));
-  if(hit&&'endpoint'in hit){const e=hit.endpoint;item('Explore connections',()=>this.exploreImage(e.imageId));if(this.exploration){item('Expand neighbors',()=>this.expandImage(e.imageId));item(this.exploration.pinned.has(e.imageId)?'Unpin image':'Pin image',()=>this.pinImage(e.imageId));}
-   item('Move image',()=>{this.select(hit);this.setMode('move');});item('Connect from here',()=>this.beginConnect(e));item('Properties',()=>this.openInspector());item('Open image',()=>this.run(()=>this.host.openImage(e.imageId)));item('Open companion note',()=>this.run(()=>this.host.openCompanion(e.imageId)));
-   if(this.host.annotationAvailable())item('Annotate in Image Annotation',()=>this.run(()=>this.host.annotateInAnnotation(e.imageId)));
-   if(e.regionId){const regionId=e.regionId,region=this.scene.regions.get(regionId);item('Create image from region',()=>this.run(()=>this.host.extractRegion(regionId)));
-    if(region&&isForeignRegion(region)){if(this.host.annotationAvailable())item('Open in Image Annotation',()=>this.run(()=>this.host.openInAnnotation(regionId)));}
-    else item('Delete region and its connections',()=>this.run(()=>this.host.deleteRegion(regionId)));}
-  }else if(hit){const name=relationOf(hit.edge.properties);if(name)item(`Explore every “${name}” connection`,()=>this.exploreRelation(name));item('Connection properties',()=>this.openInspector());item('Delete connection',()=>this.run(()=>this.host.deleteEdge(hit.edge.id)));}
-  const labels=this.host.historyLabels();menu.addSeparator();
-  if(labels.undo)item(`Undo ${labels.undo}`,()=>this.run(()=>this.host.undo()));
-  if(labels.redo)item(`Redo ${labels.redo}`,()=>this.run(()=>this.host.redo()));
-  const chosen=this.selected.size;
-  item(chosen?`Return ${chosen===1?'this image':`these ${chosen} images`} to the grid`:'Return every moved image to the grid',()=>this.run(async()=>{
-   const released=await this.host.unpinImages(chosen?[...this.selected]:undefined);
-   new Notice(released?`${released.toLocaleString()} image${released===1?'':'s'} returned to the grid.`:'No image is out of the grid.');
-  }));
-  item('Explore a relation',()=>this.exploreRelationPicker());
-  const block=this.viewBlock(hit);
-  if(block){
-   item('Copy this view as a note block',()=>this.run(async()=>{await navigator.clipboard.writeText(block);new Notice('Block copied. Paste it into any note.');}));
-   item('Add this view to a note…',()=>this.run(async()=>{const path=await this.host.insertNoteBlock(block);if(path)new Notice(`Added to ${path}.`);}));
+ /**
+  * The context menu, built in sections so every entry point reads the same way:
+  *
+  *   the thing under the pointer · the view · undo and redo · export · delete
+  *
+  * A right-click on an image, a region or a connection shows only that thing, its history and
+  * its delete: a menu about a picture is not the place for the tools, and the toolbar has
+  * them. A right-click on the canvas, the Actions button and Shift+F10 show `everything`: the
+  * selection's items first when there is one, then the view. The image items act on the
+  * selection through the methods the keys and the toolbar call, so the three surfaces cannot
+  * disagree — `pointAt` has already put the hit into the selection, or left a selection that
+  * held it standing.
+  */
+ private menu(point:{clientX:number;clientY:number},hit:Hit|null,event?:MouseEvent,everything=hit===null){
+  const menu=event?Menu.forEvent(event):new Menu();
+  let open=false;
+  const section=()=>{if(open)menu.addSeparator();open=false;};
+  const item=(label:string,icon:string,callback:()=>void)=>{menu.addItem(i=>i.setTitle(label).setIcon(icon).onClick(callback));open=true;};
+  const ex=this.exploration;
+  if(hit&&'endpoint'in hit){
+   const e=hit.endpoint,region=e.regionId?this.scene.regions.get(e.regionId):undefined,foreign=!!region&&isForeignRegion(region);
+   const ids=!e.regionId&&this.selected.has(e.imageId)?[...this.selected]:[e.imageId],many=ids.length>1,these=many?`these ${ids.length} images`:'this image';
+   if(region){
+    // The region first: it is what was pointed at. Its image follows.
+    item('Connect from here','git-fork',()=>this.beginConnect(e));
+    item('Properties','settings-2',()=>this.openInspector());
+    item('Create image from region','crop',()=>this.run(()=>this.host.extractRegion(region.id)));
+    if(foreign&&this.host.annotationAvailable())item('Open in Image Annotation','pen-tool',()=>this.run(()=>this.host.openInAnnotation(region.id)));
+    section();
+   }
+   item(many?`Explore ${these}`:'Explore connections','compass',()=>this.exploreImages(ids));
+   if(ex){if(ex.countsHops)item(many?`Expand neighbors of ${these}`:'Expand neighbors','expand',()=>this.expandImages(ids));
+    const pinnable=ids.filter(id=>!ex.isAnchor(id)),release=pinnable.every(id=>ex.pinned.has(id));
+    if(pinnable.length)item(`${release?'Unpin':'Pin'} ${many?`${pinnable.length} images`:'image'}`,release?'pin-off':'pin',()=>this.pinImages(pinnable));}
+   if(!region){
+    section();
+    item('Connect from here','git-fork',()=>this.beginConnect(e));
+    // With the whole view below, the tools are in their own group.
+    if(!everything){item(many?'Move these images':'Move image','move',()=>this.setMode('move'));item('Draw rectangle region','square',()=>this.setMode('rect'));item('Draw polygon region','pen-tool',()=>this.setMode('polygon'));}
+    item('Properties','settings-2',()=>this.openInspector());
+   }
+   section();
+   item('Open image','image',()=>this.run(()=>this.host.openImage(e.imageId)));
+   item('Open companion note','file-text',()=>this.run(()=>this.host.openCompanion(e.imageId)));
+   if(this.host.annotationAvailable())item('Annotate in Image Annotation','pen-tool',()=>this.run(()=>this.host.annotateInAnnotation(e.imageId)));
+   if(!ex&&!everything){section();item(`Return ${these} to the grid`,'layout-grid',()=>this.returnToGrid(ids));}
+  }else if(hit){
+   const name=relationOf(hit.edge.properties);
+   if(name)item(`Explore every “${name}” connection`,'compass',()=>this.exploreRelation(name));
+   item('Properties','settings-2',()=>this.openInspector());
   }
-  item('Example connections',()=>this.run(()=>this.host.seedDemo()));
-  menu.addSeparator();item('Pan / select',()=>this.setMode('select'));item('Draw rectangle region',()=>this.setMode('rect'));item('Draw polygon region',()=>this.setMode('polygon'));if(this.mode==='polygon'&&this.polygon)item('Finish polygon',()=>this.finishPolygon());
-  menu.addSeparator();this.exportMenu(menu);menu.showAtPosition({x:point.clientX,y:point.clientY});
+  if(everything){
+   section();
+   if(ex)item('Back to the vault','arrow-left',()=>this.exitExploration());
+   item('Fit everything','maximize',()=>this.fit());
+   if(this.selected.size)item('Zoom to the selection','zoom-in',()=>this.zoomPreset('selection'));
+   section();
+   item('Navigate','mouse-pointer',()=>this.setMode('select'));
+   item('Move images','move',()=>this.setMode('move'));
+   item('Draw rectangle region','square',()=>this.setMode('rect'));
+   item('Draw polygon region','pen-tool',()=>this.setMode('polygon'));
+   if(this.mode==='polygon'&&this.polygon)item('Finish polygon','check',()=>this.finishPolygon());
+   section();
+   item('Explore a relation…','compass',()=>this.exploreRelationPicker());
+   if(!ex)item(this.selected.size?`Return ${this.selected.size===1?'this image':`these ${this.selected.size} images`} to the grid`:'Return every moved image to the grid','layout-grid',()=>this.returnToGrid(this.selected.size?[...this.selected]:undefined));
+   const block=this.viewBlock(hit);
+   if(ex&&block){
+    item('Copy this view as a note block','copy',()=>this.run(async()=>{await navigator.clipboard.writeText(block);new Notice('Block copied. Paste it into any note.');}));
+    item('Add this view to a note…','file-plus',()=>this.run(async()=>{const path=await this.host.insertNoteBlock(block);if(path)new Notice(`Added to ${path}.`);}));
+   }
+  }
+  const labels=this.host.historyLabels();
+  section();
+  if(labels.undo)item(`Undo ${labels.undo}`,'undo-2',()=>this.run(()=>this.host.undo()));
+  if(labels.redo)item(`Redo ${labels.redo}`,'redo-2',()=>this.run(()=>this.host.redo()));
+  if(everything){section();this.exportMenu(item);}
+  // Delete last, in a group of its own, as Obsidian's own menus do.
+  section();
+  if(hit&&'endpoint'in hit&&hit.endpoint.regionId){const regionId=hit.endpoint.regionId,region=this.scene.regions.get(regionId);if(region&&!isForeignRegion(region))item('Delete region and its connections','trash-2',()=>this.run(()=>this.host.deleteRegion(regionId)));}
+  else if(hit&&'edge'in hit)item('Delete connection','trash-2',()=>this.run(()=>this.host.deleteEdge(hit.edge.id)));
+  menu.showAtPosition({x:point.clientX,y:point.clientY});
  }
- private exportMenu(menu:Menu){const action=(label:string,visual:boolean,scope:'current'|'selected'|'whole')=>menu.addItem(i=>i.setTitle(label).onClick(()=>this.run(async()=>{const frame=this.frame(scope);if(!frame.imageIds.length)throw new Error('Select at least one image.');await(visual?this.host.exportVisual(frame,this.canvas):this.host.exportCanvas(frame));})));
-  action('Save current graph as editable Canvas',false,'current');action('Save selected images as editable Canvas',false,'selected');action('Save whole vault as editable Canvas',false,'whole');action('Save viewport as visual snapshot',true,'current');}
+ private returnToGrid(ids?:readonly string[]){this.run(async()=>{
+  const released=await this.host.unpinImages(ids);
+  new Notice(released?`${released.toLocaleString()} image${released===1?'':'s'} returned to the grid.`:'No image is out of the grid.');
+ });}
+ /** In the vault the current graph IS the whole vault, so that pair collapses to one entry. */
+ private exportMenu(item:(label:string,icon:string,callback:()=>void)=>void){
+  const action=(label:string,visual:boolean,scope:'current'|'selected'|'whole')=>item(label,visual?'camera':'download',()=>this.run(async()=>{const frame=this.frame(scope);if(!frame.imageIds.length)throw new Error('Select at least one image.');await(visual?this.host.exportVisual(frame,this.canvas):this.host.exportCanvas(frame));}));
+  if(this.exploration)action('Save this view as editable Canvas',false,'current');
+  if(this.selected.size)action('Save selected images as editable Canvas',false,'selected');
+  action('Save whole vault as editable Canvas',false,'whole');
+  action('Save viewport as visual snapshot',true,'current');
+ }
  /**
   * The block that would draw what is on screen. An exploration describes itself; in the vault
   * view there is nothing to draw, so whatever is under the pointer or chosen stands in.
@@ -602,61 +695,101 @@ export class ImageGraphView extends ItemView {
  }
  private openInspector(){this.inspector.removeClass('is-hidden');this.renderInspector();}
  private toggleInspector(){if(this.inspector.hasClass('is-hidden'))this.openInspector();else{this.metadataTicket++;this.inspector.addClass('is-hidden');}}
+ /**
+  * The panel, in the same order whatever is chosen: what it is, what can be done with it,
+  * its fields, its properties, and one Save at the bottom that stays in view. Prose is kept
+  * out — a field explains itself by its caption and its placeholder, and a problem is said on
+  * the row that has it.
+  */
  private renderInspector(){
-  const ticket=++this.metadataTicket;for(const builder of this.propertyBuilders)builder.dispose();this.propertyBuilders=[];this.inspector.empty();const head=this.inspector.createDiv({cls:'image-graph-inspector-head'});head.createSpan({text:'Properties'});const close=head.createEl('button',{text:'×',attr:{'aria-label':'Close properties'}});close.onclick=()=>{this.metadataTicket++;this.inspector.addClass('is-hidden');};
-  const edge=this.snapshot.edges.find(e=>e.id===this.selectedEdge);if(edge){this.inspector.createEl('p',{text:`${this.scene.describe(edge.source)} → ${this.scene.describe(edge.target)}`});this.inspector.createEl('label',{text:'Arrow direction'});const select=this.inspector.createEl('select');for(const [value,text]of [['none','None'],['forward','Source → target'],['reverse','Source ← target'],['both','Both directions']])select.createEl('option',{attr:{value},text});select.value=edge.direction;this.inspector.createEl('p',{text:'Describe the connection in relation, for example “resembles”. This text appears beside the line.'});this.propertyEditor('Connection details',edge.properties,async props=>{if(!relationOf(props))throw new Error('Describe the connection in relation, as text, for example “resembles”.');await this.host.saveEdge({...edge,direction:select.value as Direction,properties:props});});return;}
+  const ticket=++this.metadataTicket;for(const builder of this.propertyBuilders)builder.dispose();this.propertyBuilders=[];this.inspector.empty();
+  const head=this.inspector.createDiv({cls:'image-graph-inspector-head'}),title=head.createSpan({cls:'image-graph-inspector-heading'});
+  const close=head.createEl('button',{text:'×',attr:{'aria-label':'Close properties'}});close.onclick=()=>{this.metadataTicket++;this.inspector.addClass('is-hidden');};
+  const edge=this.snapshot.edges.find(e=>e.id===this.selectedEdge);
+  if(edge){
+   title.setText('Connection');
+   const ends=this.inspector.createDiv({cls:'image-graph-inspector-identity'}).createDiv();
+   ends.createDiv({cls:'image-graph-inspector-name',text:this.scene.describe(edge.source)});
+   ends.createDiv({cls:'image-graph-inspector-sub',text:`→ ${this.scene.describe(edge.target)}`});
+   const select=this.field('Arrow').createEl('select');
+   for(const [value,text]of [['none','None'],['forward','Source → target'],['reverse','Source ← target'],['both','Both directions']])select.createEl('option',{attr:{value},text});select.value=edge.direction;
+   this.propertyEditor(edge.properties,async props=>{if(!relationOf(props))throw new Error('Give the connection a relation — the label shown beside its line, for example “resembles”.');await this.host.saveEdge({...edge,direction:select.value as Direction,properties:props});},[],'The relation property is the label beside the line.');
+   return;
+  }
   const region=this.selectedRegion?this.scene.regions.get(this.selectedRegion):undefined;
-  if(region&&isForeignRegion(region)){this.foreignInspector(region);return;}
-  if(region){this.inspector.createEl('label',{text:'Region label'});const label=this.inspector.createEl('input');label.value=region.label;const geometry=this.inspector.createEl('details');geometry.createEl('summary',{text:'Region geometry'});const shape=this.geometryEditor(geometry,region.shape);this.propertyEditor('Region properties',region.properties,async props=>{await this.host.saveRegion({...region,label:label.value,shape:shape.getShape(),properties:props});});return;}
-  const imageId=[...this.selected][0],image=imageId?this.scene.images.get(imageId):undefined;if(!image){this.inspector.createEl('p',{cls:'image-graph-empty-inspector',text:'Select an image, region, or connection.'});return;}
+  if(region&&isForeignRegion(region)){title.setText('Region');this.foreignInspector(region);return;}
+  if(region){
+   title.setText('Region');
+   const label=this.field('Label').createEl('input',{attr:{placeholder:'Region'}});label.value=region.label;
+   const geometry=this.inspector.createEl('details',{cls:'image-graph-inspector-details'});geometry.createEl('summary',{text:'Position and size'});const shape=this.geometryEditor(geometry,region.shape);
+   this.propertyEditor(region.properties,async props=>{await this.host.saveRegion({...region,label:label.value,shape:shape.getShape(),properties:props});});
+   return;
+  }
+  const imageId=[...this.selected][0],image=imageId?this.scene.images.get(imageId):undefined;
+  if(!image){title.setText('Properties');this.inspector.createEl('p',{cls:'image-graph-empty-inspector',text:'Select an image, a region or a connection.'});return;}
+  title.setText('Image');
+  const name=image.path.split('/').pop()??image.path,folder=image.path.slice(0,image.path.length-name.length-1);
+  const identity=this.inspector.createDiv({cls:'image-graph-inspector-identity has-thumb'});
+  identity.createEl('img',{cls:'image-graph-inspector-thumb',attr:{src:this.app.vault.adapter.getResourcePath(image.path),alt:''}});
+  const text=identity.createDiv();text.createDiv({cls:'image-graph-inspector-name',text:name});
+  if(folder)text.createDiv({cls:'image-graph-inspector-sub',text:folder});
   // One image is edited at a time. Say which, rather than let a selection of forty look like one.
-  if(this.selected.size>1)this.inspector.createEl('p',{cls:'image-graph-inspector-title',text:`${this.selected.size} images selected · editing one of them`});
-  this.inspector.createEl('p',{text:image.path});const open=this.inspector.createEl('button',{text:'Open companion note'});open.onclick=()=>this.run(()=>this.host.openCompanion(imageId));
-  const loading=this.inspector.createEl('p',{text:'Loading properties…'});this.run(async()=>{const props=await this.host.readMetadata(imageId);if(!this.active||ticket!==this.metadataTicket)return;loading.remove();this.propertyEditor('Image details and tags',props,p=>this.host.saveMetadata(imageId,p));});
+  if(this.selected.size>1)text.createDiv({cls:'image-graph-inspector-sub',text:`One of ${this.selected.size} selected`});
+  const actions=this.inspector.createDiv({cls:'image-graph-inspector-actions'});
+  const openImage=actions.createEl('button',{text:'Open image'});openImage.onclick=()=>this.run(()=>this.host.openImage(imageId));
+  const open=actions.createEl('button',{text:'Companion note'});open.onclick=()=>this.run(()=>this.host.openCompanion(imageId));
+  const loading=this.inspector.createEl('p',{cls:'image-graph-inspector-sub',text:'Loading properties…'});
+  this.run(async()=>{const props=await this.host.readMetadata(imageId);if(!this.active||ticket!==this.metadataTicket)return;loading.remove();this.propertyEditor(props,p=>this.host.saveMetadata(imageId,p),[...RESERVED_KEYS]);});
  }
+ /** A caption on the left and the control on the right, one line. */
+ private field(caption:string):HTMLElement{const row=this.inspector.createEl('label',{cls:'image-graph-inspector-field'});row.createSpan({cls:'image-graph-inspector-caption',text:caption});return row;}
  /** A region Image Annotation drew: its name, where it was attached, and the way back. Nothing here edits. */
  private foreignInspector(region:RegionRecord){
-  this.inspector.createEl('p',{cls:'image-graph-inspector-title',text:`${region.label} · drawn in Image Annotation`});
+  const identity=this.inspector.createDiv({cls:'image-graph-inspector-identity'}).createDiv();
+  identity.createDiv({cls:'image-graph-inspector-name',text:region.label});
+  identity.createDiv({cls:'image-graph-inspector-sub',text:'Drawn in Image Annotation'});
   const actions=this.inspector.createDiv({cls:'image-graph-inspector-actions'});
   if(this.host.annotationAvailable()){const open=actions.createEl('button',{text:'Open in Image Annotation'});open.onclick=()=>this.run(()=>this.host.openInAnnotation(region.id));}
-  const extract=actions.createEl('button',{text:'Create image from region'});extract.onclick=()=>this.run(()=>this.host.extractRegion(region.id));
+  const extract=actions.createEl('button',{text:'Create image'});extract.onclick=()=>this.run(()=>this.host.extractRegion(region.id));
   const attachments=this.host.regionAttachments(region.id);
-  this.inspector.createEl('h4',{text:attachments.length?'Attached to':'Not attached to any note'});
+  this.inspector.createDiv({cls:'image-graph-inspector-section',text:attachments.length?'Attached to':'Not attached to any note'});
   for(const attachment of attachments){const note=attachment.notePath.replace(/\.md$/,'');const b=this.inspector.createEl('button',{cls:'image-graph-attachment',text:attachment.blockId?`${note} · paragraph`:note});b.onclick=()=>this.run(()=>this.host.openAttachment(attachment));}
-  this.inspector.createEl('p',{cls:'image-graph-property-help',text:'Edit or delete this region in Image Annotation. Connections you draw to it stay here.'});
+  this.inspector.createEl('p',{cls:'image-graph-property-help',text:'Edit or delete this region in Image Annotation. Connections drawn to it stay here.'});
  }
  /** Named fields for the one structured value an owner edits by hand, parsed rather than cast. */
  private geometryEditor(parent:HTMLElement,shape:RegionShape):{getShape:()=>RegionShape}{
   const number=(host:HTMLElement,caption:string,value:number)=>{
-   const field=host.createEl('label',{cls:'image-graph-property-field'});field.createSpan({text:caption});
+   const field=host.createEl('label',{cls:'image-graph-geometry-field'});field.createSpan({text:caption});
    const input=field.createEl('input',{attr:{type:'number',step:'0.001',min:'0',max:'1','aria-label':caption}});input.value=String(value);return input;
   };
   const read=(input:HTMLInputElement)=>input.value.trim()===''?Number.NaN:Number(input.value);
   if(shape.type==='rect'){
-   const row=parent.createDiv({cls:'image-graph-property-row'});
+   const row=parent.createDiv({cls:'image-graph-geometry-row'});
    const x=number(row,'x',shape.x),y=number(row,'y',shape.y),width=number(row,'Width',shape.width),height=number(row,'Height',shape.height);
    parent.createEl('p',{cls:'image-graph-property-help',text:'Fractions of the image, measured from its top-left corner.'});
    return {getShape:()=>parseRegionShape({type:'rect',x:read(x),y:read(y),width:read(width),height:read(height)})};
   }
   parent.createEl('p',{cls:'image-graph-property-help',text:'Corners as fractions of the image, in order.'});
-  const corners=shape.points.map((point,index)=>{const row=parent.createDiv({cls:'image-graph-property-row'});row.createSpan({text:`Corner ${index+1}`});return{x:number(row,'x',point.x),y:number(row,'y',point.y)};});
+  const corners=shape.points.map((point,index)=>{const row=parent.createDiv({cls:'image-graph-geometry-row'});row.createSpan({cls:'image-graph-inspector-caption',text:`Corner ${index+1}`});return{x:number(row,'x',point.x),y:number(row,'y',point.y)};});
   return {getShape:()=>parseRegionShape({type:'polygon',points:corners.map(corner=>({x:read(corner.x),y:read(corner.y)}))})};
  }
- private propertyEditor(label:string,properties:Properties,save:(properties:Properties)=>Promise<void>){
-  this.inspector.createEl('h4',{text:label});
-  const feedback=this.inspector.createEl('p',{attr:{role:'status','aria-live':'polite'}});
-  // Each field reports itself as it is typed. Saving stays the boundary, not the first warning.
-  const report=(count:number)=>{feedback.textContent=count?`${count} ${count===1?'property needs':'properties need'} attention.`:'';};
-  const builder=renderPropertyBuilder(this.inspector,properties,{reservedKeys:label.startsWith('Image')?[...RESERVED_KEYS]:[],onChange:()=>report(0)});
+ private propertyEditor(properties:Properties,save:(properties:Properties)=>Promise<void>,reserved:string[]=[],hint?:string){
+  this.inspector.createDiv({cls:'image-graph-inspector-section',text:'Properties'});
+  if(hint)this.inspector.createEl('p',{cls:'image-graph-property-help',text:hint});
+  const builder=renderPropertyBuilder(this.inspector,properties,{reservedKeys:reserved,onChange:()=>report(0)});
   this.propertyBuilders.push(builder);
-  this.inspector.insertBefore(feedback,this.inspector.lastElementChild);
-  const button=this.inspector.createEl('button',{text:'Save properties'});
+  // The footer stays in view however long the table is, so Save is never scrolled away.
+  const footer=this.inspector.createDiv({cls:'image-graph-inspector-footer'});
+  const button=footer.createEl('button',{cls:'mod-cta',text:'Save'});
+  const feedback=footer.createSpan({cls:'image-graph-inspector-status',attr:{role:'status','aria-live':'polite'}});
+  // Each field reports itself as it is typed. Saving stays the boundary, not the first warning.
+  const report=(count:number)=>{feedback.textContent=count?`${count} ${count===1?'property needs':'properties need'} attention`:'';};
   const recheck=()=>report(builder.check());
   this.registerDomEvent(this.inspector,'input',recheck);this.registerDomEvent(this.inspector,'change',recheck);
   button.onclick=()=>{this.run(async()=>{
    feedback.textContent='';button.disabled=true;
-   try{await save(builder.getValue());feedback.textContent='Properties saved.';new Notice('Properties saved.');this.schedule();}
-   catch(error){const message=propertyMessage(error);feedback.textContent=message||'Unable to save properties. Try again.';builder.check();}
+   try{await save(builder.getValue());feedback.textContent='Saved';this.schedule();}
+   catch(error){const message=propertyMessage(error);feedback.textContent=message||'Could not save. Try again.';builder.check();}
    finally{button.disabled=false;}
   });};
  }
@@ -664,19 +797,19 @@ export class ImageGraphView extends ItemView {
  focusImage(imageId:string){const r=this.positions.get(imageId)??this.scene.images.get(imageId);if(!r)return;this.setSelection(imageSelection([imageId]));this.camera=fitBox(r,{width:this.canvas.clientWidth,height:this.canvas.clientHeight},{padX:80,padY:100,minScale:.01,maxScale:1.8});this.schedule();}
  revealExtracted(imageId:string,parentImageId:string){this.refresh();if(this.exploration){this.exploration.expand(parentImageId);this.rebuild(false);}this.focusImage(imageId);}
  /** Explore whatever is chosen. A connection is a thing a person pointed at, so it means the
-  * two pictures it joins — `Explore every “…” connection` is the relation, and it says so. */
+  * two pictures it joins — `Explore every “…” connection` is the relation, and it says so. A
+  * selection of several images means all of them: a smaller space to arrange and draw in. */
  private exploreSelection(){
   const selection=this.selection;
   if(selection.kind==='edge'){
    const edge=this.snapshot.edges.find(e=>e.id===selection.id);
    if(edge)return this.exploreImages([...new Set([edge.source.imageId,edge.target.imageId])]);
   }
-  const id=[...this.selected][0];
-  if(id)this.exploreImage(id);
+  if(this.selected.size)this.exploreImages([...this.selected]);
   else new Notice('Choose an image to explore its connections, or use the arrow beside the button to choose a relation.',7000);
  }
  exploreImage(imageId:string){this.exploreImages([imageId]);}
- /** One picture, or the two a connection joins. */
+ /** One picture, the two a connection joins, or every picture of a selection. */
  exploreImages(imageIds:readonly string[]){
   const next=Exploration.fromImages(this.snapshot,imageIds,this.exploration?.savedCamera??{...this.camera});
   if(!next)return;
@@ -709,8 +842,11 @@ export class ImageGraphView extends ItemView {
   if(ex.relation!==null){if(value)this.exploreRelation(value);else this.exitExploration();return;}
   ex.filter=value;this.relationSelect.value=value;this.schedule();
  }
- expandImage(imageId:string){const ex=this.exploration;if(!ex){this.exploreImage(imageId);return;}ex.expand(imageId);this.rebuild(true);}
- pinImage(imageId:string){const ex=this.exploration;if(!ex||ex.isRoot(imageId))return;ex.togglePin(imageId);this.schedule();}
+ /** Outside an exploration there is nothing to expand, so the images are explored instead. */
+ expandImages(imageIds:readonly string[]){const ex=this.exploration;if(!imageIds.length)return;if(!ex){this.exploreImages(imageIds);return;}for(const id of imageIds)ex.expand(id);this.rebuild(true);}
+ /** One state for the set: all pinned becomes all free; anything else becomes all pinned. */
+ pinImages(imageIds:readonly string[]){const ex=this.exploration;if(!ex)return;const ids=imageIds.filter(id=>!ex.isAnchor(id));if(!ids.length)return;
+  const release=ids.every(id=>ex.pinned.has(id));for(const id of ids)if(release||!ex.pinned.has(id))ex.togglePin(id);this.schedule();}
  private rebuild(refit:boolean){if(!this.exploration)return;
   this.scene.rebuildExploration();if(refit)this.fit();this.schedule();}
  exitExploration(){const ex=this.exploration;if(!ex)return;this.camera={...ex.savedCamera};this.exploration=null;this.setSelection(keepImages(this.selection));this.cancel();this.schedule();}

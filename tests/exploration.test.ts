@@ -70,19 +70,30 @@ describe('depth', () => {
 });
 
 describe('pinning', () => {
- it('toggles an ordinary image and refuses a starting picture', () => {
+ it('toggles an ordinary image and refuses the anchor', () => {
   const ex = Exploration.fromImages(chain, ['a'], CAMERA)!;
   ex.togglePin('b'); expect([...ex.pinned]).toEqual(['b']);
   ex.togglePin('b'); expect([...ex.pinned]).toEqual([]);
   ex.togglePin('a'); expect([...ex.pinned]).toEqual([]);
   expect(ex.isRoot('a')).toBe(true);
+  expect(ex.isAnchor('a')).toBe(true);
   expect(ex.isRoot('b')).toBe(false);
  });
 
- it('pins where a drag placed an image, never a starting picture', () => {
+ it('pins where a drag placed an image, never the anchor', () => {
   const ex = Exploration.fromImages(chain, ['a'], CAMERA)!;
   ex.pin('b'); ex.pin('b'); ex.pin('a');
   expect([...ex.pinned]).toEqual(['b']);
+ });
+
+ it('lets every starting picture of a selection be pinned, because none is the anchor', () => {
+  // The point of exploring a selection is a smaller space to arrange and draw in, and an
+  // image that cannot be moved cannot be arranged.
+  const ex = Exploration.fromImages(chain, ['a', 'c'], CAMERA)!;
+  expect(ex.isRoot('a') && ex.isRoot('c')).toBe(true);
+  expect(ex.isAnchor('a') || ex.isAnchor('c')).toBe(false);
+  ex.pin('a'); ex.togglePin('c');
+  expect([...ex.pinned].sort()).toEqual(['a', 'c']);
  });
 
  it('leaves a pinned image where it was put', () => {
@@ -104,6 +115,45 @@ describe('pinning', () => {
 });
 
 describe('rebuilding', () => {
+ const moved = (before: Map<string, {x: number; y: number}>, after: Map<string, {x: number; y: number}>) =>
+  [...after].filter(([id, r]) => { const was = before.get(id); return was && (was.x !== r.x || was.y !== r.y); }).map(([id]) => id);
+ const copy = (positions: Map<string, {x: number; y: number}>) => new Map([...positions].map(([id, r]) => [id, {x: r.x, y: r.y}]));
+
+ it('holds every placed image when the vault changes, and places only the newcomer', () => {
+  // Drawing a connection while exploring notifies the view, which rebuilds. That is no reason
+  // to move anything the owner can see. Measured before this, 2026-09-21: every image of a
+  // rootless neighbourhood moved ~320px on every rebuild, whether or not anything had changed.
+  for (const roots of [['a'], ['a', 'c']]) {
+   const ex = Exploration.fromImages(chain, roots, CAMERA)!;
+   ex.setDepth(3); ex.rebuild(chain);
+   const before = copy(ex.positions);
+   ex.rebuild(chain);
+   expect(moved(before, ex.positions), roots.join()).toEqual([]);
+   const grown = snapshotOf(['a', 'b', 'c', 'd', 'e'], [...chain.edges, edge('be', 'b', 'e')]);
+   ex.rebuild(grown);
+   expect(moved(before, ex.positions), roots.join()).toEqual([]);
+   expect(ex.positions.has('e')).toBe(true);
+  }
+ });
+
+ it('lets unpinned images settle again after the question changes, and holds pinned ones', () => {
+  const ex = Exploration.fromImages(chain, ['a'], CAMERA)!;
+  ex.setDepth(3); ex.rebuild(chain);
+  ex.positions.set('c', {...ex.positions.get('c')!, x: 5000, y: 5000});
+  ex.positions.set('d', {...ex.positions.get('d')!, x: -5000, y: -5000});
+  ex.pin('d');
+  const before = copy(ex.positions);
+  ex.setDepth(2); ex.rebuild(chain);
+  const settled = moved(before, ex.positions);
+  expect(settled).toContain('c');
+  expect(settled).not.toContain('d');
+  expect(settled).not.toContain('a');
+  // The question was answered; the next rebuild is for the vault and holds everything.
+  const after = copy(ex.positions);
+  ex.rebuild(chain);
+  expect(moved(after, ex.positions)).toEqual([]);
+ });
+
  it('lays out every image the graph holds', () => {
   const ex = Exploration.fromImages(chain, ['a'], CAMERA)!;
   ex.setDepth(3); ex.rebuild(chain);
@@ -135,6 +185,24 @@ describe('rebuilding', () => {
  });
 });
 
+describe('paths', () => {
+ it('traces from whichever starting picture reached the image, and nothing for a root', () => {
+  const ex = Exploration.fromImages(chain, ['a', 'd'], CAMERA)!;
+  ex.setDepth(1); ex.rebuild(chain);
+  expect(ex.pathTo('b').map(step => step.edge.id)).toEqual(['ab']);
+  expect(ex.pathTo('c').map(step => step.edge.id)).toEqual(['cd']);
+  expect(ex.pathTo('a')).toEqual([]);
+  expect(ex.pathTo('ghost')).toEqual([]);
+  expect(Exploration.fromRelation(chain, 'related', CAMERA)!.pathTo('b')).toEqual([]);
+ });
+
+ it('a relation has nothing to expand', () => {
+  const ex = Exploration.fromRelation(chain, 'related', CAMERA)!;
+  ex.expand('a');
+  expect([...ex.expanded]).toEqual([]);
+ });
+});
+
 describe('the cap', () => {
  const wide = snapshotOf(
   ['root', ...Array.from({length: 400}, (_, n) => `n${n}`)],
@@ -143,6 +211,14 @@ describe('the cap', () => {
 
  it('is one number, and a capped neighbourhood says so', () => {
   const ex = Exploration.fromImages(wide, ['root'], CAMERA)!;
+  expect(ex.graph.ids.length).toBe(EXPLORE_LIMIT);
+  expect(ex.graph.capped).toBe(true);
+ });
+
+ it('counts the starting pictures too', () => {
+  const every = wide.images.map(image => image.id);
+  const ex = Exploration.fromImages(wide, every, CAMERA)!;
+  expect(ex.roots.length).toBe(EXPLORE_LIMIT);
   expect(ex.graph.ids.length).toBe(EXPLORE_LIMIT);
   expect(ex.graph.capped).toBe(true);
  });

@@ -111,6 +111,20 @@ describe('selection', () => {
   expect([...scene.selectedImages]).toEqual(['b']);
  });
 
+ it('knows which hits the selection already holds', () => {
+  const {scene} = built();
+  scene.setSelection(imageSelection(['a', 'b']));
+  expect(scene.holds({endpoint: {imageId: 'a'}})).toBe(true);
+  expect(scene.holds({endpoint: {imageId: 'a', regionId: 'r1'}})).toBe(false);
+  expect(scene.holds({edge: edge('ab', 'a', 'b')})).toBe(false);
+  scene.select({endpoint: {imageId: 'a', regionId: 'r1'}});
+  // The region rings its image, but pointing at the image is not pointing at the region.
+  expect(scene.holds({endpoint: {imageId: 'a'}})).toBe(false);
+  expect(scene.holds({endpoint: {imageId: 'a', regionId: 'r1'}})).toBe(true);
+  scene.select({edge: edge('ab', 'a', 'b')});
+  expect(scene.holds({edge: edge('ab', 'a', 'b')})).toBe(true);
+ });
+
  it('hands the selection back as something a menu can act on', () => {
   const {scene} = built();
   scene.select({endpoint: {imageId: 'a', regionId: 'r1'}});

@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 
-import {neighborhood, relationNames, relationNeighborhood, tracePath} from '../src/traversal';
+import {neighborhood, neighborhoodFrom, relationNames, relationNeighborhood, tracePath} from '../src/traversal';
 import type {EdgeRecord, ImageRecord} from '../src/types';
 
 const image = (id: string): ImageRecord => ({id, path: `${id}.png`, x: 0, y: 0, width: 100, height: 80});
@@ -21,6 +21,21 @@ describe('image graph traversal', () => {
   const expanded = neighborhood(snapshot, 'a', 1, new Set(['b']), 2);
   expect(expanded.ids).toEqual(['a', 'b']);
   expect(expanded.capped).toBe(true);
+ });
+
+ it('traces a path back to whichever starting image reached the target', () => {
+  const snapshot = {images: ['a', 'b', 'c', 'd'].map(image), edges: [edge('ab', 'a', 'b'), edge('cd', 'c', 'd')]};
+  const result = neighborhoodFrom(snapshot, ['a', 'c'], 1, new Set());
+  expect(tracePath(null, 'd', result).map((step) => step.from)).toEqual(['c']);
+  expect(tracePath('a', 'd', result)).toEqual([]);
+  expect(tracePath(null, 'a', result)).toEqual([]);
+ });
+
+ it('caps the starting images along with the rest', () => {
+  const snapshot = {images: ['a', 'b', 'c', 'd'].map(image), edges: [edge('ab', 'a', 'b'), edge('cd', 'c', 'd')]};
+  const result = neighborhoodFrom(snapshot, ['a', 'c', 'd'], 1, new Set(), 2);
+  expect(result.ids).toEqual(['a', 'c']);
+  expect(result.capped).toBe(true);
  });
 
  it('ignores dangling edges and keeps every relation', () => {

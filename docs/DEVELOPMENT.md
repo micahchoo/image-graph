@@ -52,8 +52,11 @@ The graph is four pure modules (one file, graph.ts, until 2026-09-21; none impor
 
 Exploration module src/exploration.ts exports Exploration and EXPLORE_LIMIT:
 - Exploration.fromImages(snapshot, imageIds, savedCamera) and .fromRelation(snapshot, relation, savedCamera) return null rather than an empty view.
-- anchor is the one starting picture; two roots or a relation anchor nothing. countsHops is false for a relation.
-- setDepth clamps to 1..3 and clears expanded; expand/togglePin/pin/isRoot hold the rest. rebuild(snapshot) recomputes the graph and the layout.
+- anchor is the one starting picture; two or more roots, or a relation, anchor nothing. countsHops is false for a relation.
+- isRoot is a starting picture (ringed, never a path's far end); isAnchor is the one image never moved or pinned. togglePin and pin refuse only the anchor.
+- setDepth clamps to 1..3 and clears expanded; expand is a no-op for a relation. Both mark the question changed.
+- rebuild(snapshot) recomputes the graph and the layout. After a changed question every unpinned image settles again from where it was; otherwise every placed image is held and only newcomers are placed, so a vault change moves nothing.
+- pathTo(imageId) traces back to whichever root reached the image. The traversal caps starting images along with the rest.
 - filter dims connections and never reaches the traversal. EXPLORE_LIMIT is the one cap, and the status text reads it.
 - New exploration behaviour goes here, not in the view. The view keeps the camera, the selection and the two select elements.
 
@@ -116,7 +119,7 @@ Shortcuts module src/shortcuts.ts exports Command, commandFor, swallows and SHOR
 View module src/view.ts exports VIEW_TYPE = 'image-graph-view' and ImageGraphView extends ItemView:
 - constructor(leaf: WorkspaceLeaf, host: GraphHost)
 - focusImage(imageId: string): void
-- exploreImage(imageId: string): void
+- exploreImage(imageId: string): void; exploreImages(imageIds): every picture of a selection, none anchored
 - all edits via GraphHost; subscribe/unsubscribe lifecycle managed
 - Keyboard/context actions, mobile tap/long-press/pinch, slim inspector from prototype.
 - Normalized rectangle and polygon regions, whole-image/region edges, arbitrary YAML with relation label, optional arrows.

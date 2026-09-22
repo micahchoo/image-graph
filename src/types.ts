@@ -68,9 +68,12 @@ export interface BackgroundJobs {
  stopJobs():void;
 }
 
-/** Ways out of the canvas and into the vault. All of them open or create something. */
+/** Ways out of the canvas and into the vault. All of them open or create something, except
+ * the last, which only points the file explorer. */
 export interface VaultDoors {
  openCompanion(imageId:string):Promise<void>;
+ /** Highlight the image in the file explorer as it highlights the open note. Never focuses it. */
+ showInExplorer(imageId:string):void;
  openImage(imageId:string):Promise<void>;
  extractRegion(regionId:string):Promise<void>;
  /** Append a block to a note the owner picks. Returns the note, or '' if they cancelled. */

@@ -66,6 +66,7 @@ The workspace opens with that image in the middle of the view.
 
 In the graph, the arrow keys go from image to image.
 Hold Shift to add the next image to the selection.
+When one image is selected, the file explorer highlights its file, and scrolls to it if auto-reveal is on, as it does for the open note.
 The arrow keys move the images themselves while the Move tool is on.
 
 ## Four ways to explore
@@ -75,11 +76,14 @@ The arrow keys move the images themselves while the Move tool is on.
 | What you chose | What you get |
 | --- | --- |
 | An image or a region | That image and its connections, one hop out |
+| Several images | All of them, each with its connections, one hop out |
 | A connection | Both images it joins, and their connections |
 | A relation, from the arrow beside **Explore** | Every image that relation joins, across the vault |
 | Nothing | A reminder of the two ways above |
 
 A connection gives you its two ends because that is the thing you pointed at.
+Several images give you a smaller space to draw in: none of them is anchored, so you can move and pin every one.
+Drawing a connection while exploring moves nothing; changing the depth lets unpinned images settle again.
 To see every connection with the same label, use the arrow beside **Explore**, or right-click the connection and select **Explore every “…” connection**.
 
 A relation has no starting image and no hop count.

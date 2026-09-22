@@ -71,6 +71,14 @@ describe('scrollBy', () => {
 describe('fitBox', () => {
  const options = {padX: 80, padY: 150, margin: 100, bottomInset: 35};
 
+ it('stays positive and finite when the viewport is smaller than its own padding', () => {
+  // A pane a few pixels wide, mid-layout. The view refuses to take its first fit from one,
+  // but the arithmetic must not hand back a negative scale either way.
+  const camera = fitBox(rect(0, 0, 4000, 3000), {width: 3, height: 2}, options);
+  expect(camera.scale).toBeGreaterThan(0);
+  expect(Number.isFinite(camera.x) && Number.isFinite(camera.y)).toBe(true);
+ });
+
  it('centres the box across, and lifts it clear of the bottom chrome', () => {
   const box = rect(-200, -100, 400, 200);
   const camera = fitBox(box, VIEW, options);

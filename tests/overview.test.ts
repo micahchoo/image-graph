@@ -17,7 +17,17 @@ class Vault {
  async modify(file:File,text:string){file.text=text;}
  async modifyBinary(file:File,binary:ArrayBuffer){file.binary=binary;}
 }
-function canvas(){return {width:0,height:0,getContext:()=>({clearRect(){},drawImage(){}}),toBlob(cb:(b:Blob)=>void){cb(new Blob([new Uint8Array([1])],{type:'image/png'}));}} as unknown as HTMLCanvasElement;}
+/** Slots a restored page reports as having no pixels, for the test that seeds a damaged PNG. */
+let transparent=new Set<number>();
+/** A canvas that behaves like one in the two ways the atlas depends on: assigning its size
+ * clears it, and a tile drawn at a slot stays there until something clears or covers it. */
+function canvas(){
+ const tiles=new Set<string>();let size=0,sized=0;
+ const ctx={clearRect(x:number,y:number){tiles.delete(`${x},${y}`);},drawImage(_s:unknown,x:number,y:number){tiles.add(`${x},${y}`);},
+  getImageData(_x:number,_y:number,w:number,h:number){const data=new Uint8ClampedArray(w*h*4).fill(255);for(const slot of transparent){const x0=(slot%16)*32,y0=Math.floor(slot/16)*32;for(let y=y0;y<y0+32;y++)for(let x=x0;x<x0+32;x++)data[(y*w+x)*4+3]=0;}return {data};}};
+ return {get width(){return size;},set width(v:number){size=v;sized++;tiles.clear();},get height(){return size;},set height(v:number){size=v;},tiles,sized:()=>sized,
+  getContext:()=>ctx,toBlob(cb:(b:Blob)=>void){cb(new Blob([new Uint8Array([1])],{type:'image/png'}));}} as unknown as HTMLCanvasElement&{tiles:Set<string>;sized:()=>number};
+}
 function environment(vault:Vault){
  const win={setTimeout,clearTimeout,createEl:()=>canvas(),createImageBitmap:async(_blob:Blob)=>{vault.activeDecodes++;vault.maxDecodes=Math.max(vault.maxDecodes,vault.activeDecodes);if(vault.gate)await vault.gate;vault.activeDecodes--;return {width:512,height:512,close(){}};}};
  const doc={defaultView:win,createEl:()=>canvas()} as unknown as Document;
@@ -27,7 +37,7 @@ const image=(id:string)=>({id,path:`${id}.png`,x:0,y:0,width:1,height:1});
 async function settle(){await Promise.resolve();await Promise.resolve();}
 
 describe('OverviewAtlas',()=>{
- beforeEach(()=>vi.useRealTimers()); afterEach(()=>vi.restoreAllMocks());
+ beforeEach(()=>{vi.useRealTimers();transparent=new Set();}); afterEach(()=>vi.restoreAllMocks());
  it('keeps page decoding bounded when many pages are requested',async()=>{
   const vault=new Vault();let release!:()=>void;vault.gate=new Promise<void>(r=>{release=r;});
   const {app,doc}=environment(vault),atlas=new OverviewAtlas(app,doc),images=Array.from({length:20000},(_,i)=>image(`i${i}`));
@@ -84,6 +94,27 @@ describe('OverviewAtlas',()=>{
  it('copies the existing prefix when an image is appended',async()=>{
   const vault=new Vault(),a=image('a'),b=image('b');for(const im of [a,b])vault.files.set(im.path,new FakeTFile(im.path) as File);const {app,doc}=environment(vault),atlas=new OverviewAtlas(app,doc);atlas.sync([a]);atlas.get(a,()=>{});await new Promise(r=>setTimeout(r,130));const before=atlas.get(a,()=>{})!,reads=vault.originalReads;
   atlas.sync([a,b]);expect(atlas.get(a,()=>{})?.source).toBe(before.source);atlas.get(b,()=>{});await new Promise(r=>setTimeout(r,130));expect(vault.originalReads).toBe(reads+1);expect(atlas.get(a,()=>{})?.source).toBe(before.source);atlas.dispose();
+ });
+ it('keeps the tiles it carried over when the page loads again for a newcomer',async()=>{
+  // Sizing a canvas clears it. The page that inherits the old canvas must not be sized again,
+  // or every carried tile is transparent while still marked ready — and then saved that way.
+  const vault=new Vault(),a=image('a'),b=image('b');for(const im of [a,b])vault.files.set(im.path,new FakeTFile(im.path) as File);const {app,doc}=environment(vault),atlas=new OverviewAtlas(app,doc);
+  atlas.sync([a]);atlas.get(a,()=>{});await new Promise(r=>setTimeout(r,130));
+  const held=atlas.get(a,()=>{})!.source as ReturnType<typeof canvas>;expect(held.sized()).toBe(1);expect(held.tiles.has('0,0')).toBe(true);
+  atlas.sync([a,b]);atlas.get(b,()=>{});await new Promise(r=>setTimeout(r,130));
+  expect(atlas.get(b,()=>{})?.source).toBe(held);expect(held.sized()).toBe(1);
+  expect(held.tiles.has('0,0')).toBe(true);expect(held.tiles.has('32,0')).toBe(true);atlas.dispose();
+ });
+ it('decodes a tile a saved page holds transparent, and saves the page again',async()=>{
+  const vault=new Vault(),a=image('a'),b=image('b');for(const im of [a,b])vault.files.set(im.path,new FakeTFile(im.path) as File);
+  const sig=(id:string)=>({id,path:`${id}.png`,mtime:1,size:1});
+  vault.files.set('_Image Graph/Thumbnails/page-0.json',Object.assign(new FakeTFile('_Image Graph/Thumbnails/page-0.json'),{text:JSON.stringify({version:1,items:[sig('a'),sig('b')]})}));
+  vault.files.set('_Image Graph/Thumbnails/page-0.png',Object.assign(new FakeTFile('_Image Graph/Thumbnails/page-0.png'),{binary:new ArrayBuffer(1)}));
+  transparent=new Set([1]);
+  const {app,doc}=environment(vault),atlas=new OverviewAtlas(app,doc);let saves=0;const modify=vault.modifyBinary.bind(vault);vault.modifyBinary=async(f,bin)=>{saves++;await modify(f,bin);};
+  atlas.sync([a,b]);atlas.get(a,()=>{});await new Promise(r=>setTimeout(r,130));
+  expect(vault.originalReads).toBe(1);expect(atlas.stats.ready).toBe(2);expect(saves).toBe(1);
+  const held=atlas.get(b,()=>{})!.source as ReturnType<typeof canvas>;expect(held.tiles.has('32,0')).toBe(true);atlas.dispose();
  });
  it('reuses the expanded page after a fresh atlas instance',async()=>{
   const vault=new Vault(),a=image('a'),b=image('b');for(const im of [a,b])vault.files.set(im.path,new FakeTFile(im.path) as File);const first=environment(vault),atlas=new OverviewAtlas(first.app,first.doc);atlas.sync([a]);atlas.get(a,()=>{});await new Promise(r=>setTimeout(r,130));atlas.sync([a,b]);atlas.get(b,()=>{});await new Promise(r=>setTimeout(r,130));const reads=vault.originalReads;atlas.dispose();

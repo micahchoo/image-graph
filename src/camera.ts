@@ -71,9 +71,10 @@ export interface FitOptions {
  */
 export function fitBox(box: Rect, viewport: {width: number; height: number}, options: FitOptions): Camera {
  const {padX, padY, margin = 0, bottomInset = 0, minScale = MIN_SCALE, maxScale = MAX_FIT_SCALE} = options;
+ // A viewport smaller than its own padding has no room; the scale must still be positive.
  const scale = clamp(Math.min(
-  (viewport.width - padX) / Math.max(1, box.width + margin),
-  (viewport.height - padY) / Math.max(1, box.height + margin),
+  Math.max(1, viewport.width - padX) / Math.max(1, box.width + margin),
+  Math.max(1, viewport.height - padY) / Math.max(1, box.height + margin),
  ), minScale, maxScale);
  return {
   scale,

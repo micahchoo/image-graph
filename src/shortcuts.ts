@@ -89,9 +89,9 @@ export const SHORTCUTS:Array<{group:string;rows:Array<[string,string]>}>=[
   ['I','Open properties'],
  ]},
  {group:'Explore',rows:[
-  ['E','Explore the connections of the selected image'],
-  ['X','Expand the neighbours of the selected image'],
-  ['P','Pin or unpin the selected image'],
+  ['E','Explore the selected images and their connections'],
+  ['X','Expand the neighbours of the selected images'],
+  ['P','Pin the selected images, or unpin them when all are pinned'],
   ['Right click, long press, Shift + F10','Actions for what is under the pointer'],
   ['Ctrl or ⌘ + Z','Undo the last change to the graph'],
   ['Ctrl or ⌘ + Shift + Z','Redo it'],

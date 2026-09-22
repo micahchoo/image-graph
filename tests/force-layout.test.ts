@@ -3,7 +3,7 @@ import {describe, expect, it} from 'vitest';
 import {containsRegion} from '../src/region-shape';
 import {edgeEndpoints, endpointPosition} from '../src/edge-endpoints';
 import {forceLayout} from '../src/force-layout';
-import {neighborhood, relationNames, relationNeighborhood} from '../src/traversal';
+import {neighborhood, neighborhoodFrom, relationNames, relationNeighborhood} from '../src/traversal';
 import type {EdgeRecord, ImageRecord, Rect, RegionRecord} from '../src/types';
 import {EXPLORE_BOX, exploreSize} from '../src/layout';
 
@@ -84,6 +84,27 @@ describe('graph geometry and layout', () => {
   const hopTwo = Math.hypot(two.x - root.x, two.y - root.y);
   expect(Number.isFinite(hopOne) && Number.isFinite(hopTwo)).toBe(true);
   expect(hopTwo).toBeGreaterThan(hopOne);
+ });
+
+ it('keeps a held image where it was and settles the rest around it', () => {
+  const images = ['a', 'b', 'c', 'd'].map(image);
+  const graph = neighborhood({images, edges: [edge('ab', 'a', 'b'), edge('bc', 'b', 'c'), edge('bd', 'b', 'd')]}, 'a', 3, new Set());
+  const first = forceLayout(images, graph, 'a', new Set(), new Map());
+  const held = new Set(['b', 'c']);
+  const again = forceLayout(images, graph, 'a', held, first);
+  for (const id of held) expect(again.get(id)).toEqual(first.get(id));
+  // Nothing movable: the same map back, at no cost.
+  const everything = forceLayout(images, graph, 'a', new Set(graph.ids), first);
+  for (const id of graph.ids) expect(everything.get(id)).toEqual(first.get(id));
+ });
+
+ it('puts the starting pictures of a rootless neighbourhood inside their neighbours', () => {
+  const images = ['p', 'q', 'p1', 'p2', 'q1', 'q2'].map(image);
+  const edges = [edge('1', 'p', 'p1'), edge('2', 'p', 'p2'), edge('3', 'q', 'q1'), edge('4', 'q', 'q2')];
+  const graph = neighborhoodFrom({images, edges}, ['p', 'q'], 1, new Set());
+  const result = forceLayout(images, graph, null, new Set(), new Map());
+  const radius = (id: string) => Math.hypot(result.get(id)!.x, result.get(id)!.y);
+  expect(Math.max(radius('p'), radius('q'))).toBeLessThan(Math.min(radius('p1'), radius('p2'), radius('q1'), radius('q2')));
  });
 
  it('contains an explored thumbnail in one box, whatever its proportions', () => {

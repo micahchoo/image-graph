@@ -1,3 +1,33 @@
+# 0.2.3
+
+Explore a selection, and a graph that holds still.
+
+- **Explore** acts on every selected image. With several starting images none is anchored, so all of them can be moved and pinned: a smaller space to arrange and draw connections in. The status line traces a path from whichever starting image reached the image you select.
+- Drawing a connection while exploring moves nothing. The view rebuilds on every change, and before this every image of a multi-image exploration moved by hundreds of pixels each time; an anchored exploration re-seeded every unpinned image when one new image arrived. A rebuild now holds every placed image and places only newcomers; changing the depth or expanding an image lets unpinned images settle again from where they were.
+- The exploration layout settles. Its force pass cools over its last third and stops when nothing moves; at a fixed step it never settled at all. A multi-image exploration puts the starting images on the inner ring and their neighbours around them.
+- A selection of more images than the exploration limit is capped and says so, like a neighbourhood that size.
+
+The file explorer follows the selection.
+
+- Select one image and the file explorer highlights its file, and scrolls to it if auto-reveal is on, as it does for the open note. Focus stays on the canvas.
+
+Right-click menus, keys and the toolbar agree.
+
+- A right-click on one of several selected images keeps the selection, so the menu acts on all of them. It used to collapse the selection to that image, and the multi-image items could only be reached from the empty canvas beside them.
+- One menu, in sections: the thing under the pointer, the view, undo and redo, export, and delete last. A right-click on an image, a region or a connection shows only that thing; the empty canvas, the Actions button and Shift+F10 show the view too. Every item has an icon. **Example connections** is a command, not a menu item.
+- **X** and **P** expand and pin the whole selection, as the menu does. Pin over a set is one state: all pinned becomes all free, anything else becomes all pinned.
+- The Actions menu offers Back to the vault, Fit everything, Zoom to the selection and Move images, which were keyboard-only.
+
+The properties panel is one line per property.
+
+- Name, format, value and a small × on one line, as in Obsidian's own Properties. Lists and groups open beneath their row. Placeholders replace the repeated captions and the help paragraphs; a reserved name is reported on its row as it is typed.
+- The panel names what is chosen: an image with its thumbnail, name and folder; a connection's two ends; a region's label. Save stays in view at the bottom.
+
+Fixed:
+
+- Some cards in the whole-vault view stayed blank until you zoomed in. Their atlas tiles had been saved fully transparent: a page that inherited its canvas from the previous layout was resized, and resizing clears a canvas. Tiles are no longer wiped, a blank tile in a saved page is decoded again, and the vault repairs itself on the next open.
+- On the first paint after a plugin reload the vault was sometimes at 0% in the top-left corner, or at 100% on the origin. The first fit now waits for both the images and a laid-out pane, whichever arrives last.
+
 # 0.2.2
 
 Regions from the Image Annotation plugin.

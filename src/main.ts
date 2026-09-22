@@ -24,6 +24,7 @@ class NotePicker extends FuzzySuggestModal<TFile>{
  onClose(){super.onClose();window.setTimeout(()=>{if(!this.chosen)this.answer(null);},0);}
 }
 import {exploreSize} from './layout';
+import {mirrorInExplorer} from './explorer';
 import {isCatalogImage} from './catalog';
 import {extractionPath, findExtractionPosition, regionCrop} from './extraction';
 import {detached} from './dom';
@@ -111,7 +112,7 @@ export default class ImageGraphPlugin extends Plugin implements GraphHost {
   this.registerEvent(this.app.workspace.on('file-menu',(menu,file)=>{
    if(!(file instanceof TFile)||!isImage(file.path))return;
    menu.addItem(item=>item.setTitle('Find in image graph').setIcon('search').onClick(()=>this.run(()=>this.revealPath(file.path))));
-   menu.addItem(item=>item.setTitle('Explore image connections').setIcon('git-fork').onClick(()=>this.run(async()=>{const view=await this.openGraph();const image=this.getSnapshot().images.find(i=>i.path===file.path);if(image)view.exploreImage(image.id);})));
+   menu.addItem(item=>item.setTitle('Explore image connections').setIcon('compass').onClick(()=>this.run(async()=>{const view=await this.openGraph();const image=this.getSnapshot().images.find(i=>i.path===file.path);if(image)view.exploreImage(image.id);})));
   }));
   this.registerEvent(this.app.vault.on('create',file=>this.scheduleRefresh(file)));
   this.registerEvent(this.app.vault.on('delete',file=>this.scheduleRefresh(file)));
@@ -197,6 +198,7 @@ export default class ImageGraphPlugin extends Plugin implements GraphHost {
   await this.app.workspace.getLeaf('tab').openFile(file);
   return file.path;
  }
+ showInExplorer(imageId:string):void{const image=this.getSnapshot().images.find(i=>i.id===imageId),file=image&&this.app.vault.getAbstractFileByPath(image.path);if(file instanceof TFile)mirrorInExplorer(this.app,file);}
  private async revealPath(path:string):Promise<void>{
   const view=await this.openGraph(),image=this.getSnapshot().images.find(i=>i.path===path);
   if(!image){new Notice('That image is not in the graph yet. It is added when the catalog next refreshes.');return;}

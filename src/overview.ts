@@ -12,6 +12,18 @@ type Crop={source:CanvasImageSource;x:number;y:number;width:number;height:number
 /** `images` is a slot array: a hole is an image that left, and holes are never closed up. */
 interface Page {index:number;images:Array<ImageRecord|null>;blanks:number;canvas?:HTMLCanvasElement;ready:Set<number>;queued:boolean;loading:boolean;complete:boolean;used:number;listeners:Set<()=>void>}
 
+/** The occupied slots whose 32x32 block has no pixel with any alpha at all. */
+function transparentSlots(ctx:CanvasRenderingContext2D,images:Array<ImageRecord|null>):Set<number>{
+ const blank=new Set<number>(),data=ctx.getImageData(0,0,SIDE,SIDE).data;
+ images.forEach((image,slot)=>{
+  if(!image)return;
+  const x0=(slot%16)*TILE,y0=Math.floor(slot/16)*TILE;
+  for(let y=y0;y<y0+TILE;y++)for(let x=x0;x<x0+TILE;x++)if(data[(y*SIDE+x)*4+3]>0)return;
+  blank.add(slot);
+ });
+ return blank;
+}
+
 /** Tiny resident atlas tiles, with only two originals being decoded at a time. */
 export class OverviewAtlas {
  private pages:Page[]=[];
@@ -138,7 +150,17 @@ export class OverviewAtlas {
    if(!value||typeof value!=='object'||!('version'in value)||value.version!==1||!('items'in value)||JSON.stringify(value.items)!==JSON.stringify(items))return false;
    const bytes=await this.app.vault.readBinary(png);if(!this.current(page))return true;
    const bitmap=await this.doc.defaultView!.createImageBitmap(new Blob([bytes]));
-   try{if(!this.current(page))return true;if(bitmap.width!==SIDE||bitmap.height!==SIDE)return false;const canvas=detached(this.doc,'canvas');canvas.width=SIDE;canvas.height=SIDE;const ctx=canvas.getContext('2d');if(!ctx)return false;ctx.drawImage(bitmap,0,0);page.canvas=canvas;page.images.forEach((image,i)=>{if(!image||items[i])page.ready.add(i);});page.complete=true;this.evict();return true;}finally{bitmap.close();}
+   try{if(!this.current(page))return true;if(bitmap.width!==SIDE||bitmap.height!==SIDE)return false;const canvas=detached(this.doc,'canvas');canvas.width=SIDE;canvas.height=SIDE;const ctx=canvas.getContext('2d');if(!ctx)return false;ctx.drawImage(bitmap,0,0);page.canvas=canvas;
+    /* A tile with no pixel at all is not a tile. Pages saved before 2026-09-21 hold them: a
+     * page that carried tiles over from the previous layout was then resized in load(), and
+     * sizing a canvas clears it, so every carried tile was saved transparent and marked ready
+     * — 159 of them in the development vault. Such a slot stays unready, so load() goes on to
+     * decode it and save the page again. A genuinely transparent original is decoded once per
+     * session for this; that is the price of never trusting a blank. */
+    const blank=transparentSlots(ctx,page.images);
+    page.images.forEach((image,i)=>{if(!image||(items[i]&&!blank.has(i)))page.ready.add(i);});
+    if(blank.size)return false;
+    page.complete=true;this.evict();return true;}finally{bitmap.close();}
   }catch{return false;}
  }
  private async load(page:Page):Promise<void>{
@@ -146,7 +168,11 @@ export class OverviewAtlas {
    const items=page.images.map(image=>image?this.signature(image):null);
    if(await this.cached(page,items)||!this.current(page))return;
    const win=this.doc.defaultView;if(!win)return;
-   const canvas=page.canvas??detached(this.doc,'canvas');canvas.width=SIDE;canvas.height=SIDE;const ctx=canvas.getContext('2d');if(!ctx)return;page.canvas=canvas;
+   const canvas=page.canvas??detached(this.doc,'canvas');
+   // Sizing a canvas clears it. A page that carried tiles over from the previous layout, or
+   // restored most of them from its PNG, keeps them; only a new canvas is sized.
+   if(canvas.width!==SIDE||canvas.height!==SIDE){canvas.width=SIDE;canvas.height=SIDE;}
+   const ctx=canvas.getContext('2d');if(!ctx)return;page.canvas=canvas;
    for(let slot=0;slot<page.images.length;slot++){
     if(!this.current(page))return;
     if(page.ready.has(slot))continue;
@@ -156,7 +182,9 @@ export class OverviewAtlas {
     if(source instanceof TFile)try{
      const bytes=await this.app.vault.readBinary(source);if(!this.current(page))return;
      const bitmap=await win.createImageBitmap(new Blob([bytes]),{resizeWidth:TILE,resizeHeight:TILE,resizeQuality:'medium'});
-     try{if(!this.current(page))return;ctx.drawImage(bitmap,(slot%16)*TILE,Math.floor(slot/16)*TILE,TILE,TILE);page.ready.add(slot);}finally{bitmap.close();}
+     try{if(!this.current(page))return;const x=(slot%16)*TILE,y=Math.floor(slot/16)*TILE;
+      // The slot may still hold the tile of an image that left; a transparent original must not blend over it.
+      ctx.clearRect(x,y,TILE,TILE);ctx.drawImage(bitmap,x,y,TILE,TILE);page.ready.add(slot);}finally{bitmap.close();}
     }catch{/* Unreadable originals remain placeholders; do not repeatedly retry. */}
     if(slot%8===7){this.notify(page);this.track();if(this.job?.signal.aborted)return;await new Promise<void>(resolve=>win.setTimeout(resolve,0));}
    }

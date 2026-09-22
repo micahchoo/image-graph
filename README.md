@@ -73,7 +73,8 @@ Opening the vault does not create a note for every image.
 
 ## Explore connections
 
-Exploration centers on one image.
+Exploration centers on one image, or on every image you selected.
+With several starting images none is anchored, so you can arrange all of them and draw connections in a smaller space.
 The depth control includes its neighbors and their connections.
 Paths can enter one region and continue through another region of the same image.
 The relation filter highlights matching connections without hiding the surrounding three-hop paths.

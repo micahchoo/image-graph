@@ -38,12 +38,6 @@ function button(parent: HTMLElement, label: string, onClick: () => void): HTMLBu
  const b = makeElement(parent, 'button') as HTMLButtonElement;
  b.type = 'button'; b.textContent = label; b.addEventListener('click', onClick); return b;
 }
-function fieldLabel(parent: HTMLElement, text: string, control: HTMLElement): HTMLLabelElement {
- const wrapper = makeElement(parent, 'label', 'image-graph-property-field') as HTMLLabelElement;
- const caption = makeElement(wrapper, 'span'); caption.textContent = text;
- wrapper.appendChild(control);
- return wrapper;
-}
 /** Show or clear a problem on one control, so a save is not the first time anyone hears about it. */
 function mark(control: HTMLElement | undefined, note: HTMLElement, message: string | null): void {
  note.textContent = message ?? '';
@@ -53,11 +47,25 @@ function mark(control: HTMLElement | undefined, note: HTMLElement, message: stri
  setClass(control, 'is-invalid', !!message);
 }
 
-const FORMAT_LABELS: Record<ValueType, string> = {text: 'Text', number: 'Number', boolean: 'Yes / no', list: 'List', object: 'Group of properties', null: 'Empty'};
+const FORMAT_LABELS: Record<ValueType, string> = {text: 'Text', number: 'Number', boolean: 'Yes / no', list: 'List', object: 'Group', null: 'Empty'};
 /** A value as text, or nothing when it has no single-line reading. */
 const scalarText = (value: PropertyValue): string => typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' ? String(value) : '';
 const emptyFor = (type: ValueType): PropertyValue => type === 'object' ? {} : type === 'list' ? [] : type === 'boolean' ? false : type === 'null' ? null : '';
+/** A control that only clears itself: the small × at the end of a row. */
+function remover(parent: HTMLElement, label: string, onClick: () => void): HTMLButtonElement {
+ const b = button(parent, '×', onClick); addClass(b, 'image-graph-property-remove'); b.setAttribute('aria-label', label); b.title = label; return b;
+}
+/** The quiet "+ Add …" that ends a table or a group. */
+function adder(parent: HTMLElement, label: string, onClick: () => void): HTMLButtonElement {
+ const b = button(parent, `+ ${label}`, onClick); addClass(b, 'image-graph-property-add'); return b;
+}
 
+/**
+ * One value: a compact format selector and the control that format needs, side by side. A
+ * list or a group opens a nested block under the row. Each row reads as one line — name,
+ * format, value — the way Obsidian's own Properties panel does, so a panel of twelve
+ * properties is twelve lines and not thirty-six.
+ */
 class ValueEditor {
  readonly root: HTMLElement;
  private type: ValueType;
@@ -88,9 +96,10 @@ class ValueEditor {
  }
  private render(value: PropertyValue): void {
   this.root.replaceChildren(); this.children = []; this.entries = [];
-  const select = makeElement(this.root, 'select') as HTMLSelectElement; this.control = select;
+  setClass(this.root, 'is-nested', this.type === 'object' || this.type === 'list');
+  const select = makeElement(this.root, 'select', 'image-graph-property-type') as HTMLSelectElement; this.control = select;
   for (const t of ['text','number','boolean','list','object','null'] as ValueType[]) { const option = makeElement(select, 'option') as HTMLOptionElement; option.value = t; option.textContent = FORMAT_LABELS[t]; if (t === this.type) option.selected = true; }
-  select.setAttribute('aria-label', 'Format'); fieldLabel(this.root, 'Format', select);
+  select.setAttribute('aria-label', 'Format'); select.title = 'Format';
   select.addEventListener('change', () => {
    this.remember();
    let previous: PropertyValue; try { previous = this.getValue(); } catch { previous = emptyFor(this.type); }
@@ -100,29 +109,43 @@ class ValueEditor {
   });
   if (this.type === 'object') this.renderObject((value && typeof value === 'object' && !Array.isArray(value)) ? value : {});
   else if (this.type === 'list') this.renderList(Array.isArray(value) ? value : []);
-  else if (this.type === 'null') { const note = makeElement(this.root, 'span', 'image-graph-property-content-label'); note.textContent = 'Content: Empty'; }
-  else { const input = makeElement(this.root, 'input') as HTMLInputElement; this.control = input; input.setAttribute('aria-label', this.type === 'boolean' ? 'Yes' : 'Content'); input.type = this.type === 'boolean' ? 'checkbox' : this.type === 'number' ? 'number' : 'text'; if (this.type === 'boolean') { input.checked = value === true; const field = fieldLabel(this.root, 'Yes', input); const hint = makeElement(field, 'span'); hint.textContent = 'Unchecked means no'; } else { input.value = typeof value === 'string' || typeof value === 'number' ? String(value) : ''; fieldLabel(this.root, 'Content', input); input.addEventListener('input', this.onChange); } }
+  else if (this.type === 'null') { const note = makeElement(this.root, 'span', 'image-graph-property-empty'); note.textContent = 'No value'; }
+  else {
+   const input = makeElement(this.root, 'input', 'image-graph-property-input') as HTMLInputElement; this.control = input;
+   input.setAttribute('aria-label', this.type === 'boolean' ? 'Yes' : 'Value');
+   input.type = this.type === 'boolean' ? 'checkbox' : this.type === 'number' ? 'number' : 'text';
+   if (this.type === 'boolean') { input.checked = value === true; input.title = 'Checked means yes'; }
+   else { input.value = scalarText(value); input.placeholder = this.type === 'number' ? '0' : 'Value'; }
+   input.addEventListener('input', this.onChange); input.addEventListener('change', this.onChange);
+  }
  }
  private renderObject(value: {[key:string]: PropertyValue}): void {
-  const caption = makeElement(this.root, 'span', 'image-graph-property-content-label'); caption.textContent = 'Content';
-  const list = makeElement(this.root, 'div', 'image-graph-property-children');
+  const list = makeElement(this.root, 'div', 'image-graph-property-nested');
   for (const [key, child] of Object.entries(value)) this.addEntry(list, key, child);
-  button(this.root, 'Add property', () => { this.addEntry(list, '', '', true); this.onChange(); });
+  adder(list, 'Add property', () => { this.addEntry(list, '', '', true); this.onChange(); });
  }
  private addEntry(list: HTMLElement, key: string, value: PropertyValue, focus = false): void {
-  const row = makeElement(list, 'div', 'image-graph-property-row'); const keyInput = makeElement(row, 'input') as HTMLInputElement; keyInput.type = 'text'; keyInput.value = key; keyInput.placeholder = 'Example: Creator'; keyInput.setAttribute('aria-label', 'Property name'); fieldLabel(row, 'Property name', keyInput);
+  const row = makeElement(list, 'div', 'image-graph-property-row');
+  const keyInput = makeElement(row, 'input', 'image-graph-property-name') as HTMLInputElement; keyInput.type = 'text'; keyInput.value = key; keyInput.placeholder = 'Name'; keyInput.setAttribute('aria-label', 'Property name');
   keyInput.addEventListener('input', this.onChange);
   const editor = new ValueEditor(row, value, this.onChange); this.children.push(editor); this.entries.push({key: '', value});
   if (focus) keyInput.focus();
   const entry = this.entries[this.entries.length - 1]; Object.defineProperty(entry, 'key', {get: () => keyInput.value});
-  button(row, 'Remove property', () => { row.remove(); const index = this.entries.indexOf(entry); if (index >= 0) { this.children.splice(index, 1); this.entries.splice(index, 1); } this.onChange(); });
+  remover(row, 'Remove property', () => { row.remove(); const index = this.entries.indexOf(entry); if (index >= 0) { this.children.splice(index, 1); this.entries.splice(index, 1); } this.onChange(); });
+  // The adder stays last as rows are added under it.
+  const add = list.querySelector(':scope > .image-graph-property-add'); if (add) list.appendChild(add);
  }
  private renderList(value: PropertyValue[]): void {
-  const caption = makeElement(this.root, 'span', 'image-graph-property-content-label'); caption.textContent = 'Content';
-  const list = makeElement(this.root, 'div', 'image-graph-property-list');
-  value.forEach(child => this.addItem(list, child)); button(this.root, 'Add item', () => { this.addItem(list, '', true); this.onChange(); });
+  const list = makeElement(this.root, 'div', 'image-graph-property-nested');
+  value.forEach(child => this.addItem(list, child));
+  adder(list, 'Add item', () => { this.addItem(list, '', true); this.onChange(); });
  }
- private addItem(list: HTMLElement, value: PropertyValue, focus = false): void { const row = makeElement(list, 'div', 'image-graph-property-list-item'); const editor = new ValueEditor(row, value, this.onChange); this.children.push(editor); if (focus) { const focusable = row.querySelector('input[aria-label="Content"], input[aria-label="Yes"]'); if (focusable instanceof HTMLElement) focusable.focus(); } button(row, 'Remove item', () => { row.remove(); this.children = this.children.filter(x => x !== editor); this.onChange(); }); }
+ private addItem(list: HTMLElement, value: PropertyValue, focus = false): void {
+  const row = makeElement(list, 'div', 'image-graph-property-item'); const editor = new ValueEditor(row, value, this.onChange); this.children.push(editor);
+  if (focus) editor.focusTarget?.focus();
+  remover(row, 'Remove item', () => { row.remove(); const index = this.children.indexOf(editor); if (index >= 0) this.children.splice(index, 1); this.onChange(); });
+  const add = list.querySelector(':scope > .image-graph-property-add'); if (add) list.appendChild(add);
+ }
  /** The control to point at when this editor's value is the problem. */
  get focusTarget(): HTMLElement | undefined { return this.control; }
  getValue(path: Array<string|number> = []): PropertyValue {
@@ -133,7 +156,7 @@ class ValueEditor {
   const input = this.control as HTMLInputElement | undefined;
   if (!input) throw new PropertyError('This value has no input to read.', path);
   if (this.type === 'boolean') return input.checked;
-  if (this.type === 'number') { if (!input.value.trim()) throw new PropertyError('Enter a number for Content.', path); const n = Number(input.value); if (!Number.isFinite(n)) throw new PropertyError('Enter a finite number for Content.', path); return n; }
+  if (this.type === 'number') { if (!input.value.trim()) throw new PropertyError('Enter a number.', path); const n = Number(input.value); if (!Number.isFinite(n)) throw new PropertyError('Enter a finite number.', path); return n; }
   return parsePropertyValue(input.value, path);
  }
  dispose(): void { this.root.replaceChildren(); this.children = []; this.entries = []; this.remembered.clear(); }
@@ -147,29 +170,35 @@ export interface PropertyBuilder {
  dispose(): void;
 }
 
+/**
+ * The table of properties: one row each. No prose above it — a reserved name is reported on
+ * the row the moment it is typed, and an empty table says in one line what goes here.
+ */
 export function renderPropertyBuilder(container: HTMLElement, properties: Properties, options: {reservedKeys?: string[]; onChange?: (properties: Properties) => void} = {}): PropertyBuilder {
  const reserved = options.reservedKeys ?? [];
  parseProperties(properties, reserved);
  const root = makeElement(container, 'div', 'image-graph-property-builder');
- const intro = makeElement(root, 'p', 'image-graph-property-help'); intro.textContent = 'Add details about your selection. For example, use creator as the property name and a person’s name as its content.';
- if (reserved.length) { const taken = makeElement(root, 'p', 'image-graph-property-help'); taken.textContent = `The plugin writes ${reserved.join(' and ')} itself, so those names are not available.`; }
  const entries = makeElement(root, 'div', 'image-graph-property-entries');
+ const empty = makeElement(root, 'p', 'image-graph-property-help'); empty.textContent = 'No properties yet. A property is a name and a value — creator, and a person’s name.';
  const rows: Array<{row: HTMLElement; keyInput: HTMLInputElement; editor: ValueEditor; note: HTMLElement}> = [];
+ const showEmpty = () => setClass(empty, 'is-hidden', rows.length > 0);
  // Invalid intermediate rows are allowed while editing; getValue remains the explicit boundary.
- const notify = () => { api.check(); try { options.onChange?.(api.getValue()); } catch { /* wait for the user to finish the row */ } };
+ const notify = () => { api.check(); showEmpty(); try { options.onChange?.(api.getValue()); } catch { /* wait for the user to finish the row */ } };
  const add = (key: string, value: PropertyValue, focus = false) => {
   const row = makeElement(entries, 'div', 'image-graph-property-row');
-  const keyInput = makeElement(row, 'input') as HTMLInputElement; keyInput.value = key; keyInput.placeholder = 'Example: Creator'; keyInput.setAttribute('aria-label', 'Property name'); fieldLabel(row, 'Property name', keyInput);
+  const keyInput = makeElement(row, 'input', 'image-graph-property-name') as HTMLInputElement; keyInput.value = key; keyInput.placeholder = 'Name'; keyInput.setAttribute('aria-label', 'Property name');
   keyInput.addEventListener('input', notify);
   const editor = new ValueEditor(row, value, notify);
   const note = makeElement(row, 'span', 'image-graph-property-problem'); note.setAttribute('role', 'alert'); addClass(note, 'is-hidden');
   const record = {row, keyInput, editor, note};
   rows.push(record);
   if (focus) keyInput.focus();
-  button(row, 'Remove property', () => { row.remove(); rows.splice(rows.indexOf(record), 1); notify(); });
+  remover(row, 'Remove property', () => { row.remove(); rows.splice(rows.indexOf(record), 1); notify(); });
+  row.appendChild(note);
  };
  Object.entries(properties).forEach(([key, value]) => add(key, value));
- button(root, 'Add property', () => { add('', '', true); notify(); });
+ adder(root, 'Add property', () => { add('', '', true); notify(); });
+ showEmpty();
 
  const api: PropertyBuilder = {
   getValue: () => {

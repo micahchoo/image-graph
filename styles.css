@@ -66,55 +66,63 @@
 .image-graph-job button:hover{color:var(--text-normal)}
 
 /* Inspector --------------------------------------------------------------- */
-.image-graph-inspector{position:absolute;right:12px;top:12px;width:min(390px,calc(100% - 24px));max-height:calc(100% - 24px);overflow:auto;padding:10px;background:var(--background-primary-alt);border:1px solid var(--background-modifier-border);border-radius:var(--radius-m);box-shadow:var(--shadow-s);z-index:3}
-.image-graph-inspector-head{display:flex;align-items:center;justify-content:space-between;font-weight:var(--font-semibold);margin-bottom:10px}
-.image-graph-inspector-head button{border:0;background:transparent;font-size:var(--font-ui-medium);line-height:1;padding:0 4px}
-.image-graph-inspector-title{font-size:var(--font-ui-small);word-break:break-word;margin-bottom:8px;color:var(--text-muted)}
-.image-graph-inspector-actions{display:flex;gap:6px;margin-bottom:10px}
-.image-graph-inspector label{display:block;margin:12px 0 5px}
-.image-graph-inspector textarea{display:block;box-sizing:border-box;width:100%;resize:vertical;min-height:130px;font-family:var(--font-monospace);font-size:var(--font-ui-small);margin:6px 0}
-.image-graph-inspector input,.image-graph-inspector select{width:100%}
-.image-graph-inspector details{margin:10px 0}
-.image-graph-inspector details summary{cursor:pointer}
-.image-graph-meta-loading textarea{box-sizing:border-box;width:100%;resize:vertical;font:var(--font-monospace);font-size:var(--font-smaller);margin-bottom:6px}
-.image-graph-meta-loading button{display:block}
-.image-graph-empty-inspector{color:var(--text-muted);font-size:var(--font-ui-small)}
+.image-graph-inspector{position:absolute;right:12px;top:12px;width:min(390px,calc(100% - 24px));max-height:calc(100% - 24px);overflow:auto;padding:0 12px 12px;background:var(--background-primary-alt);border:1px solid var(--background-modifier-border);border-radius:var(--radius-m);box-shadow:var(--shadow-s);z-index:3;font-size:var(--font-ui-small)}
+.image-graph-inspector-head{position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;padding:10px 0 8px;margin:0 0 4px;background:var(--background-primary-alt);border-bottom:1px solid var(--background-modifier-border)}
+.image-graph-inspector-heading{font-weight:var(--font-semibold);font-size:var(--font-ui-medium)}
+.image-graph-inspector-head button{border:0;box-shadow:none;background:transparent;font-size:var(--font-ui-medium);line-height:1;padding:0 4px;color:var(--text-muted)}
+.image-graph-inspector-head button:hover{color:var(--text-normal);background:transparent}
+/* What is chosen: a thumbnail when it has one, its name, and one muted line under it. */
+.image-graph-inspector-identity{display:flex;gap:10px;align-items:center;margin:6px 0 10px;min-width:0}
+.image-graph-inspector-identity>div{min-width:0}
+.image-graph-inspector-thumb{flex:none;width:56px;height:56px;object-fit:cover;border-radius:var(--radius-s);background:var(--background-secondary)}
+.image-graph-inspector-name{font-weight:var(--font-medium);overflow-wrap:anywhere}
+.image-graph-inspector-sub{color:var(--text-muted);font-size:var(--font-ui-smaller);overflow-wrap:anywhere}
+.image-graph-inspector-actions{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}
+.image-graph-inspector-actions button{font-size:var(--font-ui-smaller);padding:3px 8px}
+/* Fields: a caption on the left, the control filling the rest, one line each. */
+.image-graph-inspector-field{display:grid;grid-template-columns:72px minmax(0,1fr);align-items:center;gap:8px;margin:0 0 8px}
+.image-graph-inspector-caption{color:var(--text-muted);font-size:var(--font-ui-smaller)}
+.image-graph-inspector input,.image-graph-inspector select{width:100%;min-width:0;box-sizing:border-box}
+.image-graph-inspector-details{margin:0 0 10px}
+.image-graph-inspector-details summary{cursor:pointer;color:var(--text-muted);font-size:var(--font-ui-smaller)}
+.image-graph-geometry-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
+.image-graph-geometry-field{display:flex;align-items:center;gap:4px;flex:1 1 40%;min-width:0}
+.image-graph-geometry-field>span{color:var(--text-muted);font-size:var(--font-ui-smaller);min-width:1.2em}
+.image-graph-inspector-section{margin:14px 0 6px;font-size:var(--font-ui-smaller);font-weight:var(--font-semibold);letter-spacing:.02em;text-transform:uppercase;color:var(--text-muted)}
+.image-graph-inspector-footer{position:sticky;bottom:-12px;display:flex;align-items:center;gap:10px;margin:12px -12px 0;padding:8px 12px;background:var(--background-primary-alt);border-top:1px solid var(--background-modifier-border)}
+.image-graph-inspector-status{color:var(--text-muted);font-size:var(--font-ui-smaller)}
+.image-graph-inspector button.mod-cta{background:var(--interactive-accent);color:var(--text-on-accent);border-color:transparent}
+.image-graph-inspector button.mod-cta:hover{background:var(--interactive-accent-hover)}
+.image-graph-empty-inspector{color:var(--text-muted);padding:8px 0}
+.image-graph-attachment{display:block;width:100%;text-align:left;margin:4px 0;overflow-wrap:anywhere}
 
-/* Property builder -------------------------------------------------------- */
-.image-graph-property-builder{display:flex;flex-direction:column;gap:.5em}
-.image-graph-property-help{margin:0;color:var(--text-muted)}
-.image-graph-property-builder .image-graph-property-field{display:flex;flex-direction:column;gap:.2em;min-width:8em;margin:0}
-.image-graph-property-field>span,.image-graph-property-content-label{font-size:var(--font-small);color:var(--text-muted)}
-.image-graph-property-row{display:flex;align-items:flex-start;gap:.4em;flex-wrap:wrap}
-.image-graph-property-row>.image-graph-property-field{min-width:8em}
-.image-graph-property-value{display:flex;gap:.4em;align-items:flex-start;flex:1}
-.image-graph-property-children,.image-graph-property-list{display:flex;flex-direction:column;gap:.35em;flex:1 1 100%;padding-inline-start:1em;border-inline-start:2px solid var(--background-modifier-border)}
-.image-graph-property-list-item{display:flex;gap:.4em;align-items:flex-start}
-.image-graph-property-builder .image-graph-property-row{display:grid;grid-template-columns:minmax(0,1fr) auto;padding:8px 0;border-bottom:1px solid var(--background-modifier-border)}
-.image-graph-property-builder .image-graph-property-row>.image-graph-property-field{grid-column:1;grid-row:1;min-width:0}
-.image-graph-property-builder .image-graph-property-row>.image-graph-property-value{grid-column:1/-1;grid-row:2;min-width:0;flex-wrap:wrap}
-.image-graph-property-builder .image-graph-property-row>button{grid-column:2;grid-row:1;font-size:var(--font-ui-smaller);padding:3px 5px}
-.image-graph-property-builder .image-graph-property-value>.image-graph-property-field{flex:1;min-width:70px}
-.image-graph-property-builder .image-graph-property-value>.image-graph-property-field:first-child{flex:0 0 120px}
-.image-graph-property-builder .image-graph-property-value input[type="checkbox"]{width:var(--checkbox-size,16px);height:var(--checkbox-size,16px);flex:none;align-self:flex-start}
-.image-graph-property-problem{grid-column:1/-1;font-size:var(--font-smaller);color:var(--text-error)}
+/* Property table: one row per property — name, format, value, remove. --------- */
+.image-graph-property-builder{display:flex;flex-direction:column;gap:2px}
+.image-graph-property-help{margin:4px 0;color:var(--text-muted);font-size:var(--font-ui-smaller)}
+.image-graph-property-row{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,9fr) auto;align-items:start;gap:4px;padding:3px 0}
+.image-graph-property-row+.image-graph-property-row{border-top:1px solid var(--background-modifier-border)}
+.image-graph-property-name{font-weight:var(--font-medium)}
+.image-graph-property-value{display:flex;flex-wrap:wrap;gap:4px;align-items:center;min-width:0}
+.image-graph-property-value>.image-graph-property-type{flex:0 0 auto;width:auto;max-width:6.5em;font-size:var(--font-ui-smaller);color:var(--text-muted);padding:2px 22px 2px 6px}
+.image-graph-property-value>.image-graph-property-input{flex:1 1 60px;min-width:0}
+.image-graph-property-value>input[type="checkbox"]{flex:none;width:var(--checkbox-size,16px);height:var(--checkbox-size,16px);margin:0 4px}
+.image-graph-property-empty{color:var(--text-faint);font-style:italic}
+/* A list or a group opens under its own row, indented by a rule, across the row's full width:
+   the value cell dissolves into the grid so the format stays on the name's line. */
+.image-graph-property-row>.image-graph-property-value.is-nested,.image-graph-property-item>.image-graph-property-value.is-nested{display:contents}
+.image-graph-property-row>.image-graph-property-value.is-nested>.image-graph-property-type{grid-column:2;grid-row:1}
+.image-graph-property-item>.image-graph-property-value.is-nested>.image-graph-property-type{grid-column:1;grid-row:1;justify-self:start}
+.image-graph-property-value.is-nested>.image-graph-property-nested{grid-column:1/-1}
+.image-graph-property-row>.image-graph-property-remove{grid-column:3;grid-row:1}
+.image-graph-property-item>.image-graph-property-remove{grid-column:2;grid-row:1}
+.image-graph-property-nested{flex:1 1 100%;display:flex;flex-direction:column;gap:2px;padding-inline-start:8px;border-inline-start:2px solid var(--background-modifier-border)}
+.image-graph-property-item{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:4px}
+.image-graph-inspector .image-graph-property-remove{border:0;box-shadow:none;background:transparent;color:var(--text-faint);padding:2px 5px;line-height:1.4;font-size:var(--font-ui-medium)}
+.image-graph-inspector .image-graph-property-remove:hover{color:var(--text-error);background:transparent}
+.image-graph-inspector .image-graph-property-add{align-self:flex-start;border:0;box-shadow:none;background:transparent;color:var(--text-muted);padding:3px 2px;font-size:var(--font-ui-smaller)}
+.image-graph-inspector .image-graph-property-add:hover{color:var(--text-accent);background:transparent}
+.image-graph-property-problem{grid-column:1/-1;font-size:var(--font-ui-smaller);color:var(--text-error)}
 .image-graph-inspector input[aria-invalid="true"],.image-graph-inspector select[aria-invalid="true"]{border-color:var(--text-error)}
-
-/* A neighbourhood inside a note -------------------------------------------- */
-.image-graph-embed{border:1px solid var(--background-modifier-border);border-radius:var(--radius-m);overflow:hidden;margin-block:var(--p-spacing,1em);background:var(--background-primary)}
-.image-graph-embed-canvas{display:block;width:100%}
-.image-graph-embed-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 10px;border-top:1px solid var(--background-modifier-border);font-size:var(--font-ui-smaller);color:var(--text-muted)}
-.image-graph-embed-foot span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.image-graph-embed-foot button{flex:none;font:var(--font-ui-smaller);border:1px solid var(--background-modifier-border);border-radius:var(--radius-s);padding:3px 8px;background:var(--interactive-normal);color:var(--text-normal);cursor:pointer}
-.image-graph-embed-foot button:hover{background:var(--interactive-hover)}
-.image-graph-embed-problem{margin:0;padding:12px;color:var(--text-muted);font-size:var(--font-ui-small)}
-
-/* Shortcut panel ---------------------------------------------------------- */
-.image-graph-shortcuts table{width:100%;border-collapse:collapse}
-.image-graph-shortcuts td{padding:2px 8px 2px 0;vertical-align:top;font:var(--font-ui-small)}
-.image-graph-shortcuts td:first-child{white-space:nowrap;width:1%}
-.image-graph-shortcuts h4{margin:12px 0 4px}
-
 /* Narrow panes and touch --------------------------------------------------- */
 @media(max-width:700px){
  .image-graph-tool-label{display:none}
@@ -126,4 +134,3 @@
  .image-graph-toolbar button,.image-graph-zoom button{min-height:34px;padding:7px 10px}
  .image-graph-footer{flex-wrap:wrap}
 }
-.image-graph-attachment{display:block;width:100%;text-align:left;margin:4px 0;word-break:break-word}

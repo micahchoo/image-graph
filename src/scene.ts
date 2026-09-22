@@ -136,6 +136,20 @@ export class GraphScene {
   }));
  }
 
+ /**
+  * Whether a hit is already part of the selection. A right-click on a selected image must keep
+  * the rest selected — that is how every file manager behaves, and before 2026-09-21 it
+  * collapsed the set to the one image, so the multi-image menu could only be reached by
+  * right-clicking the empty canvas beside them. An image whose region is selected is not
+  * "selected" in this sense: the owner pointed at the picture, not the region.
+  */
+ holds(hit: Hit): boolean {
+  if ('edge' in hit) return this.current.kind === 'edge' && this.current.id === hit.edge.id;
+  const {imageId, regionId} = hit.endpoint;
+  if (regionId) return this.current.kind === 'region' && this.current.regionId === regionId;
+  return this.current.kind === 'images' && this.current.ids.has(imageId);
+ }
+
  /** The selection as something a menu or a keystroke can act on. */
  selectionHit(): Hit | null {
   const selection = this.current;
@@ -227,7 +241,7 @@ export class GraphScene {
  movable(imageId: string): Map<string, Rect> {
   const ids = this.currentImages.has(imageId) ? [...this.currentImages] : [imageId];
   const origins = new Map<string, Rect>();
-  for (const id of ids) { const rect = this.positions.get(id); if (rect && !this.exploration?.isRoot(id)) origins.set(id, copy(rect)); }
+  for (const id of ids) { const rect = this.positions.get(id); if (rect && !this.exploration?.isAnchor(id)) origins.set(id, copy(rect)); }
   return origins;
  }
 

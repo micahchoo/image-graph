@@ -116,7 +116,7 @@ Their properties identify them as examples.
 ## With Image Annotation
 
 If the Image Annotation plugin is installed, its regions appear on their images with a dashed outline.
-Select one to see the notes it is attached to, open it in Image Annotation, connect it, or extract it as an image.
+Select one to open its region note, open it in Image Annotation, connect it, or extract it as an image.
 Edit or delete those regions in Image Annotation. The graph reads its index and never writes to it.
 
 ## Storage and compatibility

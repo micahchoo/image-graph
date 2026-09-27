@@ -1,3 +1,13 @@
+# 0.3.0
+
+Works with Image Annotation 0.2, where a region is a note.
+
+- An image note's `annotations` property links the notes of the regions Image Annotation drew on the image: `[[Regions/Eyes|Eyes]]`. Selecting such a region offers **Open region note**, and an image extracted from one records the note as `region_note`.
+- A new image note is never named exactly as the note its picture came from, which read as the article itself in note search. A snapshot Image Annotation named `<source note> - image - d857` gives its note the same name; another picture with a known source note is `<source note> - image - b2df`.
+- A note's name is now set once. Each load renamed every image note to the naming rule's current answer, so a note could change its name without anyone renaming it. Only notes in the old `_Image Graph/Images` folder are still moved. Loading no longer reads every image note's properties to decide this.
+
+Image Annotation 0.1 attachments are no longer read. With Image Annotation 0.1, regions still show, without links to notes.
+
 # 0.2.3
 
 Explore a selection, and a graph that holds still.

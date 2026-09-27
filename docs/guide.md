@@ -15,7 +15,7 @@ The `image` property links to the source image.
 The `image_graph_id` property identifies its graph record.
 The `connections` property lists one link for each connection, aimed at the companion note at the other end.
 Obsidian's graph view draws these links, and it draws a link to a note that does not exist yet.
-The `annotations` property appears when the Image Annotation plugin has attached one of the image's regions to a note, and lists a link to each note.
+The `annotations` property appears when the Image Annotation plugin has drawn regions on the image, and lists a link to each region's note.
 The plugin writes these four properties. Other properties and tags are user metadata.
 
 `_Image Graph/Data/` contains JSON records for saved image positions, regions, and connections.
@@ -32,18 +32,18 @@ These files do not feed changes back into the graph.
 `_Image Graph/Extracted/` contains images created by an explicit region extraction.
 Each file is named after its region and source image, `Dark water · Harbour at dusk.png`, with a number added when that name is taken.
 Their companion notes identify the source image and region.
-When the region was drawn in Image Annotation, the companion's `source_notes` property links to the notes that region was attached to.
+When the region was drawn in Image Annotation, the companion's `region_note` property links to that region's note.
 Each extracted image appears in the whole vault and connects to its source region with a “derived from” relationship.
 Extraction places the new image on an unoccupied grid position and brings it into view.
 
 ## Image Annotation regions
 
-The [Image Annotation](https://github.com/micahchoo/image-annotation) plugin marks image regions and attaches them to notes.
+The [Image Annotation](https://github.com/micahchoo/image-annotation) plugin marks image regions, and keeps each region as a note.
 Image Graph reads its index, `Image Annotation/index.json`, and shows those regions on their images with a dashed outline.
 It reads the file, not the plugin, so the regions stay while Image Annotation is disabled and go when the file does.
 A region whose image is not in the vault is not shown.
 
-Select a foreign region to see its name and the notes it is attached to. Each opens the note or paragraph.
+Select a foreign region to see its name. **Open region note** opens the note Image Annotation keeps for it.
 **Open in Image Annotation** opens its editor there, and **Annotate in Image Annotation** on any image opens that plugin's editor on it.
 Both appear only while Image Annotation is loaded.
 

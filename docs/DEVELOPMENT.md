@@ -92,10 +92,10 @@ Extraction module src/extraction.ts exports findExtractionPosition, regionCrop a
 - extractionPath(label, parentPath, exists) names the file `<label> · <source>.png` under `_Image Graph/Extracted/`, numbering past a taken name.
 
 Annotations module src/annotations.ts exports readAnnotationIndex, annotationRegionId, annotationId, isForeignRegion and annotationPlugin:
-- readAnnotationIndex(text, imageIdByPath) turns Image Annotation's `index.json` into RegionRecords with `origin: 'image-annotation'` and `ia-` ids, plus per-region attachments and per-image sources. A region whose image is not catalogued is skipped and counted; a malformed record is skipped; a file that is not an index throws.
+- readAnnotationIndex(text, imageIdByPath) turns Image Annotation's `index.json` into RegionRecords with `origin: 'image-annotation'` and `ia-` ids, plus each region's note (`notePath`) and per-image sources. A region whose image is not catalogued is skipped and counted; a malformed record is skipped; a file that is not an index throws.
 - GraphStore.setForeignRegions holds them beside its own; upsertRegion and removeRegion refuse a foreign id; nothing foreign is written to a shard or the history. removeDanglingRegionEdges is the undoable way out when Image Annotation deletes a region.
 - annotationPlugin(app) finds the loaded plugin instance by duck-typing openRegion and openImage, at click time only. Absent means no menu item.
-- links.ts#annotationLinks and #attachmentLink produce the `annotations` property (reserved) and the extracted companion's `source_notes`. syncAnnotationLinks writes into companions that already exist and never creates one.
+- links.ts#annotationLinks and #regionNoteLink produce the `annotations` property (reserved) and the extracted companion's `region_note`. links.ts#companionStem names a new companion so it never reads as its source note. syncAnnotationLinks writes into companions that already exist and never creates one.
 
 Export module src/export.ts exports GraphExporter:
 - constructor(app: App)

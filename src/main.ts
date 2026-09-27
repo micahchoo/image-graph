@@ -7,7 +7,7 @@ import {OverviewAtlas} from './overview';
 import {SizeIndex} from './sizes';
 import {Jobs} from './jobs';
 import {renderEmbed, type EmbedHost} from './embed';
-import {EXTRACTED_ROOT, NOTES_ROOT, OLD_NOTES_ROOT, annotationLinks, attachmentLink} from './links';
+import {EXTRACTED_ROOT, NOTES_ROOT, OLD_NOTES_ROOT, annotationLinks, regionNoteLink} from './links';
 import {DATA_ROOT, EXPORTS_ROOT, THUMBNAILS_ROOT, ensureFolder} from './folders';
 import {ANNOTATION_INDEX, annotationId, annotationPlugin, readAnnotationIndex} from './annotations';
 import {FuzzySuggestModal, type App} from 'obsidian';
@@ -29,7 +29,7 @@ import {isCatalogImage} from './catalog';
 import {extractionPath, findExtractionPosition, regionCrop} from './extraction';
 import {detached} from './dom';
 import {overlaps} from './geometry';
-import {type Attachment, type GraphHost, type ImageRecord, type RegionRecord, type EdgeRecord, type Properties, type ViewFrame} from './types';
+import {type GraphHost, type ImageRecord, type RegionRecord, type EdgeRecord, type Properties, type ViewFrame} from './types';
 
 /** One answer to what is an image: the catalog's. A TIFF the catalog held was refused here until 2026-09-21. */
 const isImage=isCatalogImage;
@@ -51,7 +51,7 @@ export default class ImageGraphPlugin extends Plugin implements GraphHost {
  private refreshImages=false;
  private reloadAnnotations=false;
  /** Where Image Annotation attached each foreign region, by the graph's region id. */
- private attachments=new Map<string,Attachment[]>();
+ private regionNotes=new Map<string,string>();
  private annotationWarning='';
  private seeding:Promise<void>|null=null;
  private window!:Window;
@@ -139,13 +139,13 @@ export default class ImageGraphPlugin extends Plugin implements GraphHost {
   */
  private async syncAnnotations(){
   const file=this.app.vault.getAbstractFileByPath(ANNOTATION_INDEX);
-  if(!(file instanceof TFile)){this.attachments=new Map();this.store.setForeignRegions([]);await this.store.syncAnnotationLinks(new Map());return;}
+  if(!(file instanceof TFile)){this.regionNotes=new Map();this.store.setForeignRegions([]);await this.store.syncAnnotationLinks(new Map());return;}
   try{
    const text=await this.app.vault.cachedRead(file),byPath=new Map(this.getSnapshot().images.map(image=>[image.path,image.id]));
    const read=readAnnotationIndex(text,byPath);
    if(read.skipped.invalid)console.warn(`Image Graph: ${read.skipped.invalid} Image Annotation region${read.skipped.invalid===1?'':'s'} could not be read.`);
-   this.attachments=read.attachments;this.store.setForeignRegions(read.regions,read.sources);this.annotationWarning='';
-   await this.store.syncAnnotationLinks(annotationLinks(read.regions,read.attachments));
+   this.regionNotes=read.notes;this.store.setForeignRegions(read.regions,read.sources);this.annotationWarning='';
+   await this.store.syncAnnotationLinks(annotationLinks(read.regions,read.notes));
   }catch(error){const message=errorMessage(error);if(message!==this.annotationWarning){this.annotationWarning=message;new Notice(`Image Graph: ${message}`,8000);}}
  }
  private run(action:()=>Promise<unknown>){void action().catch(error=>new Notice(`Image Graph: ${errorMessage(error)}`,8000));}
@@ -174,8 +174,8 @@ export default class ImageGraphPlugin extends Plugin implements GraphHost {
  async saveMetadata(id:string,properties:Properties){await this.store.writeMetadata(id,properties);}
  async openCompanion(id:string){const file=await this.store.ensureCompanion(id);await this.app.workspace.getLeaf('tab').openFile(file);}
  async openImage(id:string){const image=this.getSnapshot().images.find(i=>i.id===id);const file=image&&this.app.vault.getAbstractFileByPath(image.path);if(!(file instanceof TFile))throw new Error('The image file is missing.');await this.app.workspace.getLeaf('tab').openFile(file);}
- regionAttachments(id:string){return this.attachments.get(id)??[];}
- async openAttachment(attachment:Attachment){await this.app.workspace.openLinkText(attachment.notePath+(attachment.blockId?`#^${attachment.blockId}`:''),'',true);}
+ regionNote(id:string){return this.regionNotes.get(id);}
+ async openRegionNote(id:string){const note=this.regionNotes.get(id);if(!note)throw new Error('This region has no note.');await this.app.workspace.openLinkText(note,'',true);}
  annotationAvailable(){return annotationPlugin(this.app)!==null;}
  async openInAnnotation(regionId:string){const id=annotationId(regionId),plugin=annotationPlugin(this.app);if(!id)throw new Error('This region was drawn here, not in Image Annotation.');if(!plugin)throw new Error('Image Annotation is not loaded.');plugin.openRegion(id);}
  async annotateInAnnotation(imageId:string){const image=this.getSnapshot().images.find(i=>i.id===imageId),plugin=annotationPlugin(this.app);if(!image)throw new Error('The image is missing.');if(!plugin)throw new Error('Image Annotation is not loaded.');await plugin.openImage({value:image.path,label:image.path.split('/').pop()??image.path});}
@@ -239,9 +239,9 @@ export default class ImageGraphPlugin extends Plugin implements GraphHost {
   const position=findExtractionPosition(this.getSnapshot().images, image, dimensions.width, dimensions.height,extracted.id);
   // Placed beside the picture it came from, so it keeps that place rather than the rows'.
   await this.updateImage({...extracted,...dimensions,...position,pinned:true});
-  // An extracted crop remembers the notes its region was attached to, when Image Annotation drew it.
-  const notes=this.regionAttachments(region.id).map(attachment=>attachmentLink(attachment,region.label));
-  await this.saveMetadata(extracted.id,{source_image:`[[${image.path}]]`,source_region:region.id,...(notes.length?{source_notes:notes}:{})});
+  // An extracted crop remembers its region's note, when Image Annotation drew the region.
+  const note=this.regionNotes.get(region.id);
+  await this.saveMetadata(extracted.id,{source_image:`[[${image.path}]]`,source_region:region.id,...(note?{region_note:regionNoteLink(note,region.label)}:{})});
   await this.ensureExtractionEdge(extracted, image, region);
   await this.store.flush();
   const view=await this.openGraph();

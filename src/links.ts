@@ -1,4 +1,4 @@
-import type {Attachment, EdgeRecord, ImageRecord, RegionRecord} from './types';
+import type {EdgeRecord, ImageRecord, RegionRecord} from './types';
 import {relationOf} from './properties';
 
 export const PLUGIN_ROOT = '_Image Graph';
@@ -91,24 +91,37 @@ export function sameLinks(current: unknown, links: readonly string[]): boolean {
  return Array.isArray(current) && current.length === links.length && current.every((item, index) => item === links[index]);
 }
 
-/** A wikilink to the note, or the paragraph of it, that Image Annotation attached a region to. */
-export function attachmentLink(attachment: Attachment, label: string): string {
- const target = attachment.notePath.replace(/\.md$/, '') + (attachment.blockId ? `#^${attachment.blockId}` : '');
- return `[[${target}|${alias(`${label} · ${baseName(attachment.notePath)}`)}]]`;
+/** A wikilink to an Image Annotation region's note, labelled with the region. */
+export function regionNoteLink(notePath: string, label: string): string {
+ return `[[${notePath.replace(/\.md$/, '')}|${alias(label)}]]`;
 }
 
 /**
- * The links one image's companion note carries for the notes Image Annotation attached its
- * regions to, keyed by image. Sorted and unique for the same reason `companionLinks` is: a
- * rewrite that changes nothing must produce the same text.
+ * The links one image's note carries to the notes of the regions Image Annotation drew on it,
+ * keyed by image. Sorted and unique for the same reason `companionLinks` is: a rewrite that
+ * changes nothing must produce the same text.
  */
-export function annotationLinks(regions: readonly RegionRecord[], attachments: ReadonlyMap<string, readonly Attachment[]>): Map<string, string[]> {
+export function annotationLinks(regions: readonly RegionRecord[], notes: ReadonlyMap<string, string>): Map<string, string[]> {
  const byImage = new Map<string, Set<string>>();
- for (const region of regions) for (const attachment of attachments.get(region.id) ?? []) {
+ for (const region of regions) {
+  const note = notes.get(region.id);
+  if (!note) continue;
   const links = byImage.get(region.imageId) ?? new Set<string>();
-  links.add(attachmentLink(attachment, region.label)); byImage.set(region.imageId, links);
+  links.add(regionNoteLink(note, region.label)); byImage.set(region.imageId, links);
  }
  return new Map([...byImage].map(([imageId, links]) => [imageId, [...links].sort()]));
+}
+
+/**
+ * What a new note for a picture is called, when its own file name says too little. Image
+ * Annotation names a web snapshot `<source note> - image - d857`, which is already the right
+ * name, so the note takes the picture's. Any other picture whose source note is known is
+ * `<source note> - image - b2df`, from the image id: the source note alone would read as the
+ * article itself. Undefined means the picture's own name.
+ */
+export function companionStem(imagePath: string, imageId: string, articlePath?: string): string | undefined {
+ if (/ - image - [0-9a-f]{4,64}$/i.test(baseName(imagePath)) || !articlePath) return undefined;
+ return `${baseName(articlePath)} - image - ${imageId.replace(/^img-/, '').slice(0, 4)}`;
 }
 
 export function baseName(path: string): string { return (path.split('/').pop() ?? path).replace(/\.[^.]+$/, ''); }

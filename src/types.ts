@@ -14,7 +14,6 @@ export interface ImageRecord extends Rect {id:string;path:string;metadataPath?:s
 export interface RegionRecord {id:string;imageId:string;label:string;shape:RegionShape;properties:Properties;origin?:string}
 export interface Endpoint {imageId:string;regionId?:string}
 /** One note, or one paragraph of it, that Image Annotation attached a foreign region to. */
-export interface Attachment {notePath:string;blockId?:string;captionPath:string}
 export type Direction = 'none'|'forward'|'reverse'|'both';
 export interface EdgeRecord {id:string;source:Endpoint;target:Endpoint;direction:Direction;properties:Properties}
 export interface GraphSnapshot {images:ImageRecord[];regions:RegionRecord[];edges:EdgeRecord[]}
@@ -86,8 +85,9 @@ export interface VaultDoors {
 /** Image Annotation, which may not be installed. Every door here is checked before it is shown. */
 export interface AnnotationBridge {
  /** Where Image Annotation attached a foreign region. Empty for one of ours. */
- regionAttachments(regionId:string):readonly Attachment[];
- openAttachment(attachment:Attachment):Promise<void>;
+ /** The note Image Annotation keeps for one of its regions, when the index names one. */
+ regionNote(regionId:string):string|undefined;
+ openRegionNote(regionId:string):Promise<void>;
  /** True while Image Annotation is loaded, so the view can offer its editor. */
  annotationAvailable():boolean;
  openInAnnotation(regionId:string):Promise<void>;

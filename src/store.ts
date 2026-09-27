@@ -2,7 +2,7 @@ import {parseYaml} from 'obsidian';
 import type {App, TFile} from 'obsidian';
 import type {EdgeRecord, GraphSnapshot, ImageRecord, Properties, RegionRecord} from './types';
 import {ANNOTATIONS_KEY, LINKS_KEY, RESERVED_KEYS, isRecord, parseProperties, relationOf} from './properties';
-import {NOTES_ROOT, OLD_NOTES_ROOT, PLUGIN_ROOT, baseName, companionCandidates, companionLinks, companionPath, sameLinks} from './links';
+import {OLD_NOTES_ROOT, PLUGIN_ROOT, companionCandidates, companionStem, companionLinks, companionPath, sameLinks} from './links';
 import {History, type Entry} from './history';
 import {isForeignRegion, type ImageSource} from './annotations';
 import {ensureFolder, isFile} from './folders';
@@ -113,7 +113,7 @@ export class GraphStore {
   }
 
   /**
-   * Write the notes Image Annotation attached each image's regions to into the image's
+   * Write the notes of the regions Image Annotation drew on each image into the image's
    * companion note, so Obsidian's graph joins the two. Only into a note that already exists:
    * a foreign region is not a reason to give a picture a note it never had. Web snapshots
    * also learn where they came from, once, and an owner's edit of that is kept.
@@ -326,9 +326,9 @@ export class GraphStore {
   /** What the workspace calls this picture. An extracted region's file name is a uuid, and a
    * note called `region-00e6a95d-…` is exactly the name nobody can read. */
   private displayName(image: ImageRecord): string | undefined {
-    // A web image Image Annotation saved is a hash on disk; the note it was clipped from is its name.
-    const article = this.foreignSources.get(image.id)?.articlePath;
-    if (article) return baseName(article);
+    // A picture whose file name says little, but whose source note Image Annotation knows.
+    const named = companionStem(image.path, image.id, this.foreignSources.get(image.id)?.articlePath);
+    if (named) return named;
     if (!image.path.startsWith(`${PLUGIN_ROOT}/Extracted/`)) return undefined;
     const edge = [...this.edges.values()].find(item => item.source.imageId === image.id && relationOf(item.properties) === 'derived from');
     if (!edge) return undefined;
@@ -347,9 +347,11 @@ export class GraphStore {
    * updating switched on.
    */
   async migrateCompanions(): Promise<number> { return this.mutate('rename companion notes', async () => {
-    // Both roots, because a note the plugin filed badly is the plugin's to correct. A note
-    // moved anywhere else is the owner's placement and is never touched.
-    const stale = [...this.images.values()].filter(image => image.metadataPath?.startsWith(`${OLD_NOTES_ROOT}/`) || image.metadataPath?.startsWith(`${NOTES_ROOT}/`));
+    // Only the old root. A note under NOTES_ROOT already has its name, and a name is set once:
+    // until 2026-09-27 this also renamed those, so a note took a new name whenever the rule's
+    // answer changed (Image Annotation forgetting a source note turned an article's name into a
+    // hash). A note moved anywhere else is the owner's placement and is never touched.
+    const stale = [...this.images.values()].filter(image => image.metadataPath?.startsWith(`${OLD_NOTES_ROOT}/`));
     let moved = 0;
     for (const image of stale) {
       const from = this.app.vault.getAbstractFileByPath(image.metadataPath!);

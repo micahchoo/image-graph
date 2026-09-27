@@ -743,7 +743,7 @@ export class ImageGraphView extends ItemView {
  }
  /** A caption on the left and the control on the right, one line. */
  private field(caption:string):HTMLElement{const row=this.inspector.createEl('label',{cls:'image-graph-inspector-field'});row.createSpan({cls:'image-graph-inspector-caption',text:caption});return row;}
- /** A region Image Annotation drew: its name, where it was attached, and the way back. Nothing here edits. */
+ /** A region Image Annotation drew: its name, its note, and the way back. Nothing here edits. */
  private foreignInspector(region:RegionRecord){
   const identity=this.inspector.createDiv({cls:'image-graph-inspector-identity'}).createDiv();
   identity.createDiv({cls:'image-graph-inspector-name',text:region.label});
@@ -751,9 +751,7 @@ export class ImageGraphView extends ItemView {
   const actions=this.inspector.createDiv({cls:'image-graph-inspector-actions'});
   if(this.host.annotationAvailable()){const open=actions.createEl('button',{text:'Open in Image Annotation'});open.onclick=()=>this.run(()=>this.host.openInAnnotation(region.id));}
   const extract=actions.createEl('button',{text:'Create image'});extract.onclick=()=>this.run(()=>this.host.extractRegion(region.id));
-  const attachments=this.host.regionAttachments(region.id);
-  this.inspector.createDiv({cls:'image-graph-inspector-section',text:attachments.length?'Attached to':'Not attached to any note'});
-  for(const attachment of attachments){const note=attachment.notePath.replace(/\.md$/,'');const b=this.inspector.createEl('button',{cls:'image-graph-attachment',text:attachment.blockId?`${note} · paragraph`:note});b.onclick=()=>this.run(()=>this.host.openAttachment(attachment));}
+  if(this.host.regionNote(region.id)){const note=actions.createEl('button',{text:'Open region note'});note.onclick=()=>this.run(()=>this.host.openRegionNote(region.id));}
   this.inspector.createEl('p',{cls:'image-graph-property-help',text:'Edit or delete this region in Image Annotation. Connections drawn to it stay here.'});
  }
  /** Named fields for the one structured value an owner edits by hand, parsed rather than cast. */

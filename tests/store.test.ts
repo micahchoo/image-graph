@@ -135,6 +135,16 @@ describe('GraphStore persistence safety',()=>{
   // Idempotent: a second run has nothing to move.
   expect(await s.migrateCompanions()).toBe(0);
  });
+ it('never renames a note that already has its name, even when the naming rule would now answer differently',async()=>{const v=new Vault(),s=new GraphStore(app(v),()=>{});await s.load();
+  const web=image('w','Image Annotation/Media/0123abcd.png');await s.upsertImage(web);
+  s.setForeignRegions([{...region('ia-r1','w'),origin:'image-annotation'}],new Map([['w',{articlePath:'Clips/Essay.md'}]]));
+  const file=await s.ensureCompanion('w');
+  expect(file.path).toBe('_Image Graph/Notes/Image Annotation/Media/Essay - image - w.md');
+  // Image Annotation stops knowing the source note: the rule would now name the note after the file.
+  s.setForeignRegions([{...region('ia-r1','w'),origin:'image-annotation'}],new Map());
+  expect(await s.migrateCompanions()).toBe(0);
+  expect(v.files.has(file.path)).toBe(true);
+ });
  it('keeps identity across source, companion, and folder renames',async()=>{const v=new Vault(),s=new GraphStore(app(v),()=>{});await s.load();v.files.set('old/a.png',v.make('old/a.png',''));await s.refreshCatalog();const before=s.getSnapshot().images[0];await s.ensureCompanion(before.id);const note=v.files.get('_Image Graph/Notes/old/a.md')!;v.files.delete('old/a.png');v.files.set('new/a.png',v.make('new/a.png',''));await s.renamePath('old','new');v.files.delete(note.path);v.files.set('_Image Graph/Notes/old/a.md',v.make('_Image Graph/Notes/old/a.md',note.text));await s.renamePath('_Image Graph/Images','_Image Graph/Notes');const reloaded=new GraphStore(app(v),()=>{});await reloaded.load();const after=reloaded.getSnapshot().images.find(x=>x.id===before.id)!;expect(after.path).toBe('new/a.png');expect(after.metadataPath).toContain('_Image Graph/Notes');});
  it('shows foreign regions, refuses to write them, and lets a connection reach one',async()=>{const v=new Vault(),s=new GraphStore(app(v),()=>{});await s.load();
   await s.upsertImage(image('a'));await s.upsertImage(image('b'));
@@ -179,11 +189,11 @@ describe('GraphStore persistence safety',()=>{
   expect(v.files.get('_Image Graph/Notes/a.md')?.text).not.toContain('annotations');
   expect(v.files.get('_Image Graph/Notes/a.md')?.text).toContain('caption');
  });
- it('tells a web snapshot where it came from, names its companion after the note, and keeps an owner\u2019s edit',async()=>{const v=new Vault(),s=new GraphStore(app(v),()=>{});await s.load();
+ it('tells a web snapshot where it came from, names its companion after the note but never as the note, and keeps an owner\u2019s edit',async()=>{const v=new Vault(),s=new GraphStore(app(v),()=>{});await s.load();
   const web=image('w','Image Annotation/Media/0123abcd.png');await s.upsertImage(web);
   s.setForeignRegions([{...region('ia-r1','w'),origin:'image-annotation'}],new Map([['w',{originalUrl:'https://x.test/a.png',articlePath:'Clips/Essay.md'}]]));
   const file=await s.ensureCompanion('w');
-  expect(file.path).toBe('_Image Graph/Notes/Image Annotation/Media/Essay.md');
+  expect(file.path).toBe('_Image Graph/Notes/Image Annotation/Media/Essay - image - w.md');
   await s.syncAnnotationLinks(new Map());
   const text=()=>v.files.get(file.path)?.text??'';
   expect(text()).toContain('source_url: "https://x.test/a.png"');

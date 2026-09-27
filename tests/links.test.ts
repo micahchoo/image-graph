@@ -1,6 +1,6 @@
 import {describe, expect, it, vi} from 'vitest';
 vi.mock('obsidian', () => ({parseYaml: () => ({})}));
-import {annotationLinks, attachmentLink, companionCandidates, companionLinks, companionPath, defaultCompanionPath, safeName, sameLinks} from '../src/links';
+import {annotationLinks, companionCandidates, companionStem, regionNoteLink, companionLinks, companionPath, defaultCompanionPath, safeName, sameLinks} from '../src/links';
 import type {EdgeRecord, ImageRecord} from '../src/types';
 
 const image = (id: string, path: string, metadataPath?: string): ImageRecord => ({id, path, x: 0, y: 0, width: 240, height: 240, ...(metadataPath ? {metadataPath} : {})});
@@ -77,16 +77,26 @@ describe('companion note connection links', () => {
   expect(sameLinks('x', ['x'])).toBe(false);
   expect(sameLinks(['x'], [])).toBe(false);
  });
- it('links an attachment to its note or paragraph, and gathers them per image, sorted and unique',()=>{
-  expect(attachmentLink({notePath:'Essays/Light.md',captionPath:'c'},'Sky')).toBe('[[Essays/Light|Sky · Light]]');
-  expect(attachmentLink({notePath:'Light.md',blockId:'ab12',captionPath:'c'},'Sky | [x]')).toBe('[[Light#^ab12|Sky x · Light]]');
+ it('links each image to its regions’ notes, labelled with the region, sorted and unique',()=>{
+  expect(regionNoteLink('Regions/Sky.md','Sky | [x]')).toBe('[[Regions/Sky|Sky x]]');
   const regions=[{id:'ia-1',imageId:'a',label:'Sky',shape:{type:'rect' as const,x:0,y:0,width:1,height:1},properties:{},origin:'image-annotation'},{id:'ia-2',imageId:'a',label:'Sea',shape:{type:'rect' as const,x:0,y:0,width:1,height:1},properties:{},origin:'image-annotation'},{id:'ia-3',imageId:'b',label:'Sea',shape:{type:'rect' as const,x:0,y:0,width:1,height:1},properties:{},origin:'image-annotation'}];
-  const attachments=new Map([['ia-1',[{notePath:'Z.md',captionPath:'c1'},{notePath:'A.md',captionPath:'c2'}]],['ia-2',[{notePath:'Z.md',captionPath:'c3'}]],['ia-3',[]]]);
-  const links=annotationLinks(regions,attachments);
-  expect(links.get('a')).toEqual(['[[A|Sky · A]]','[[Z|Sea · Z]]','[[Z|Sky · Z]]']);
+  const links=annotationLinks(regions,new Map([['ia-1','Regions/Sky.md'],['ia-2','Regions/Sea.md']]));
+  expect(links.get('a')).toEqual(['[[Regions/Sea|Sea]]','[[Regions/Sky|Sky]]']);
   expect(links.has('b')).toBe(false);
  });
 
+});
+
+describe('the name of an image’s note', () => {
+ it('is the snapshot’s own name, when Image Annotation already named it after its source note', () => {
+  expect(companionStem('Image Annotation/Media/Sydney Smith - image - d857.jpg','img-b2df573da602e889','Clippings/Sydney Smith.md')).toBeUndefined();
+ });
+ it('is the source note, then "image", then four characters of the image id, when the source note is known', () => {
+  expect(companionStem('Image Annotation/Media/6073388e93ea.jpg','img-b2df573da602e889','Clippings/Sydney Smith.md')).toBe('Sydney Smith - image - b2df');
+ });
+ it('is the image’s own name otherwise', () => {
+  expect(companionStem('Photos/Harbour.png','img-b2df573da602e889')).toBeUndefined();
+ });
 });
 
 describe('the names a new companion note may take', () => {

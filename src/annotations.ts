@@ -12,7 +12,7 @@
  * caller names it once.
  */
 import type {App} from 'obsidian';
-import type {Attachment, RegionRecord} from './types';
+import type {RegionRecord} from './types';
 import {parseRegionShape} from './region-shape';
 import {isRecord} from './properties';
 
@@ -26,8 +26,8 @@ const PREFIX = 'ia-';
 export interface ImageSource {originalUrl?: string; articlePath?: string}
 export interface ForeignRegions {
  regions: RegionRecord[];
- /** Keyed by the graph's region id, in index order. */
- attachments: Map<string, Attachment[]>;
+ /** Each region's note, keyed by the graph's region id. Image Annotation keeps a region as a note. */
+ notes: Map<string, string>;
  /** Keyed by image id. The first region to say wins; they all describe the same picture. */
  sources: Map<string, ImageSource>;
  skipped: {missingImage: number; invalid: number};
@@ -42,8 +42,8 @@ export function isForeignRegion(region: Pick<RegionRecord, 'origin'>): boolean {
 export function readAnnotationIndex(text: string, imageIdByPath: ReadonlyMap<string, string>): ForeignRegions {
  let value: unknown;
  try { value = JSON.parse(text); } catch { throw new Error(`Corrupt Image Annotation index: ${ANNOTATION_INDEX}`); }
- if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.regions) || !Array.isArray(value.connections)) throw new Error(`Unsupported Image Annotation index: ${ANNOTATION_INDEX}`);
- const result: ForeignRegions = {regions: [], attachments: new Map(), sources: new Map(), skipped: {missingImage: 0, invalid: 0}};
+ if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.regions)) throw new Error(`Unsupported Image Annotation index: ${ANNOTATION_INDEX}`);
+ const result: ForeignRegions = {regions: [], notes: new Map(), sources: new Map(), skipped: {missingImage: 0, invalid: 0}};
  for (const item of value.regions) {
   if (!isRecord(item) || typeof item.id !== 'string' || !item.id || typeof item.title !== 'string' || !isRecord(item.source) || typeof item.source.path !== 'string') { result.skipped.invalid++; continue; }
   const imageId = imageIdByPath.get(item.source.path);
@@ -52,19 +52,13 @@ export function readAnnotationIndex(text: string, imageIdByPath: ReadonlyMap<str
   try { shape = parseRegionShape(item.geometry); } catch { result.skipped.invalid++; continue; }
   const id = annotationRegionId(item.id);
   result.regions.push({id, imageId, label: item.title.trim() || 'Region', shape, properties: {}, origin: ANNOTATION_ORIGIN});
-  result.attachments.set(id, []);
+  if (typeof item.notePath === 'string' && item.notePath.endsWith('.md')) result.notes.set(id, item.notePath);
   if (!result.sources.has(imageId)) {
    const source: ImageSource = {};
    if (typeof item.source.originalUrl === 'string' && item.source.originalUrl) source.originalUrl = item.source.originalUrl;
    if (typeof item.source.articlePath === 'string' && item.source.articlePath) source.articlePath = item.source.articlePath;
    if (source.originalUrl || source.articlePath) result.sources.set(imageId, source);
   }
- }
- for (const item of value.connections) {
-  if (!isRecord(item) || typeof item.regionId !== 'string' || typeof item.notePath !== 'string' || typeof item.captionPath !== 'string') continue;
-  const list = result.attachments.get(annotationRegionId(item.regionId));
-  if (!list) continue;
-  list.push({notePath: item.notePath, ...(typeof item.blockId === 'string' && item.blockId ? {blockId: item.blockId} : {}), captionPath: item.captionPath});
  }
  return result;
 }

@@ -94,7 +94,6 @@
 .image-graph-inspector button.mod-cta{background:var(--interactive-accent);color:var(--text-on-accent);border-color:transparent}
 .image-graph-inspector button.mod-cta:hover{background:var(--interactive-accent-hover)}
 .image-graph-empty-inspector{color:var(--text-muted);padding:8px 0}
-.image-graph-attachment{display:block;width:100%;text-align:left;margin:4px 0;overflow-wrap:anywhere}
 
 /* Property table: one row per property — name, format, value, remove. --------- */
 .image-graph-property-builder{display:flex;flex-direction:column;gap:2px}
